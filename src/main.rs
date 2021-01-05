@@ -22,7 +22,10 @@ use leaky_bucket::LeakyBucket;
 use log::{debug, error, info};
 use qstring::QString;
 use serde::Deserialize;
+#[cfg(not(feature = "simd"))]
+use serde_json::{from_slice, from_str};
 use sha1::{Digest, Sha1};
+#[cfg(feature = "simd")]
 use simd_json::{from_slice, from_str};
 use tokio::{
     spawn,
