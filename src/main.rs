@@ -20,7 +20,7 @@ use hyper::{
 };
 use leaky_bucket::LeakyBucket;
 use log::{debug, error, info};
-use sha1::Sha1;
+use sha1::{Digest, Sha1};
 use tokio::{
     spawn,
     sync::mpsc::{unbounded_channel, UnboundedSender},
@@ -153,11 +153,10 @@ async fn server_upgrade(mut req: Request<Body>, connections: Arc<State>) -> Resu
     }
 
     let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
-    let real_key = encode(
-        Sha1::from(format!("{}{}", key.to_str().unwrap(), GUID))
-            .digest()
-            .bytes(),
-    );
+    let mut hasher = Sha1::new();
+    hasher.update(format!("{}{}", key.to_str().unwrap(), GUID));
+    let key_sha = hasher.finalize();
+    let real_key = encode(key_sha);
 
     // Setup a future that will eventually receive the upgraded
     // connection and talk a new protocol, and spawn the future
