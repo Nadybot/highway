@@ -17,6 +17,10 @@ env_logger = { version = "0.8", default-features = false, features = [
 hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 leaky-bucket = "0.10"
 log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+simd-json = { version = "0.3", default-features = false, features = [
+    "serde_impl"
+] }
 tokio = { version = "1.0", default-features = false, features = [
     "rt-multi-thread",
     "macros"
@@ -25,6 +29,7 @@ tokio-util = { version = "0.6", default-features = false, features = [
     "compat"
 ] }
 futures-util = "0.3"
+qstring = "0.7"
 sha-1 = "0.9"
 uuid = { version = "0.8", features = ["v4"] }
 

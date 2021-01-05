@@ -20,7 +20,10 @@ use hyper::{
 };
 use leaky_bucket::LeakyBucket;
 use log::{debug, error, info};
+use qstring::QString;
+use serde::Deserialize;
 use sha1::{Digest, Sha1};
+use simd_json::{from_slice, from_str};
 use tokio::{
     spawn,
     sync::mpsc::{unbounded_channel, UnboundedSender},
@@ -39,10 +42,16 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 type State = DashMap<String, DashMap<String, UnboundedSender<Message>>>;
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+#[derive(Deserialize, Debug)]
+struct Payload {
+    room: String,
+    body: String,
+}
+
 /// Handle server-side I/O after HTTP upgraded.
 async fn server_upgraded_io(
     upgraded: Upgraded,
-    room: String,
+    rooms: Vec<String>,
     connections: Arc<State>,
 ) -> Result<()> {
     // we have an upgraded connection that we can read and
@@ -79,12 +88,14 @@ async fn server_upgraded_io(
         .build()
         .unwrap();
 
-    if let Some(conns) = connections.get(&room) {
-        conns.value().insert(id.clone(), tx);
-    } else {
-        let map = DashMap::new();
-        map.insert(id.clone(), tx);
-        connections.insert(room.clone(), map);
+    for room in rooms.iter() {
+        if let Some(conns) = connections.get(room) {
+            conns.value().insert(id.clone(), tx.clone());
+        } else {
+            let map = DashMap::new();
+            map.insert(id.clone(), tx.clone());
+            connections.insert(room.clone(), map);
+        }
     }
 
     spawn(async move {
@@ -97,11 +108,16 @@ async fn server_upgraded_io(
     spawn(async move {
         while let Some(msg) = read.next().await {
             if let Ok(m) = msg {
-                debug!("Got websocket message: {:?}", m);
-                if ratelimiter.acquire_one().await.is_ok() {
-                    for recp in connections.get(&room).unwrap().value() {
-                        if recp.key() != &id {
-                            let _ = recp.value().send(m.clone());
+                let mut data = m.clone().into_data();
+                if let Ok(payload) = from_slice::<Payload>(&mut data) {
+                    debug!("Got websocket message: {:?}", payload);
+                    if rooms.iter().any(|i| i == &payload.room)
+                        && ratelimiter.acquire_one().await.is_ok()
+                    {
+                        for recp in connections.get(&payload.room).unwrap().value() {
+                            if recp.key() != &id {
+                                let _ = recp.value().send(m.clone());
+                            }
                         }
                     }
                 }
@@ -110,18 +126,20 @@ async fn server_upgraded_io(
 
         debug!("Cleaning up websocket");
         // Cleanup handler
-        let conns = connections.get(&room);
-        if let Some(c) = conns {
-            if c.len() == 1 {
-                drop(c);
-                debug!("Deleting room");
-                connections.remove(&room);
-            } else {
-                debug!("Leaving room");
-                c.value().remove(&id);
-            }
+        for room in rooms.iter() {
+            let conns = connections.get(room);
+            if let Some(c) = conns {
+                if c.len() == 1 {
+                    drop(c);
+                    debug!("Deleting room");
+                    connections.remove(room);
+                } else {
+                    debug!("Leaving room");
+                    c.value().remove(&id);
+                }
 
-            debug!("Rooms: {:?}", connections);
+                debug!("Rooms: {:?}", connections);
+            }
         }
     });
 
@@ -130,63 +148,80 @@ async fn server_upgraded_io(
 
 /// Our server HTTP handler to initiate HTTP upgrades.
 async fn server_upgrade(mut req: Request<Body>, connections: Arc<State>) -> Result<Response<Body>> {
-    let mut res = Response::new(Body::empty());
-    let room = req.uri().path().to_string();
+    let path = req.uri().path();
 
-    info!("Incoming connection to {}", &room);
+    if path == "/stream" {
+        let mut res = Response::new(Body::empty());
+        let query = QString::from(req.uri().query().unwrap_or_default());
+        let mut rooms = query.get("rooms").unwrap_or_default().to_string();
 
-    // Send a 400 to any request that doesn't have
-    // an `Upgrade` header.
-    if !req.headers().contains_key(UPGRADE)
-        || !req.headers().contains_key(SEC_WEBSOCKET_KEY)
-        || room == "/"
-    {
-        *res.status_mut() = StatusCode::BAD_REQUEST;
-        return Ok(res);
-    }
-
-    let upgrade = req.headers().get(UPGRADE).unwrap();
-
-    if upgrade.to_str().unwrap() != "websocket" {
-        *res.status_mut() = StatusCode::BAD_REQUEST;
-        return Ok(res);
-    }
-
-    let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
-    let real_key = encode(Sha1::digest(
-        format!("{}{}", key.to_str().unwrap(), GUID).as_bytes(),
-    ));
-
-    // Setup a future that will eventually receive the upgraded
-    // connection and talk a new protocol, and spawn the future
-    // into the runtime.
-    //
-    // Note: This can't possibly be fulfilled until the 101 response
-    // is returned below, so it's better to spawn this future instead
-    // waiting for it to complete to then return a response.
-    spawn(async move {
-        match upgrade::on(&mut req).await {
-            Ok(upgraded) => {
-                if let Err(e) = server_upgraded_io(upgraded, room, connections).await {
-                    eprintln!("server websocket io error: {}", e)
-                };
+        let rooms = match from_str::<Vec<String>>(&mut rooms) {
+            Ok(val) => val,
+            Err(_) => {
+                *res.status_mut() = StatusCode::BAD_REQUEST;
+                return Ok(res);
             }
-            Err(e) => eprintln!("upgrade error: {}", e),
-        }
-    });
+        };
 
-    *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    res.headers_mut()
-        .insert(CONNECTION, HeaderValue::from_static("Upgrade"));
-    res.headers_mut()
-        .insert(UPGRADE, HeaderValue::from_static("websocket"));
-    res.headers_mut().insert(
-        SEC_WEBSOCKET_ACCEPT,
-        HeaderValue::from_str(&real_key).unwrap(),
-    );
-    res.headers_mut()
-        .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
-    Ok(res)
+        info!("Incoming connection to {:?}", &rooms);
+
+        // Send a 400 to any request that doesn't have
+        // an `Upgrade` header.
+        if !req.headers().contains_key(UPGRADE)
+            || !req.headers().contains_key(SEC_WEBSOCKET_KEY)
+            || rooms.is_empty()
+        {
+            *res.status_mut() = StatusCode::BAD_REQUEST;
+            return Ok(res);
+        }
+
+        let upgrade = req.headers().get(UPGRADE).unwrap();
+
+        if upgrade.to_str().unwrap() != "websocket" {
+            *res.status_mut() = StatusCode::BAD_REQUEST;
+            return Ok(res);
+        }
+
+        let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
+        let real_key = encode(Sha1::digest(
+            format!("{}{}", key.to_str().unwrap(), GUID).as_bytes(),
+        ));
+
+        // Setup a future that will eventually receive the upgraded
+        // connection and talk a new protocol, and spawn the future
+        // into the runtime.
+        //
+        // Note: This can't possibly be fulfilled until the 101 response
+        // is returned below, so it's better to spawn this future instead
+        // waiting for it to complete to then return a response.
+        spawn(async move {
+            match upgrade::on(&mut req).await {
+                Ok(upgraded) => {
+                    if let Err(e) = server_upgraded_io(upgraded, rooms, connections).await {
+                        eprintln!("server websocket io error: {}", e)
+                    };
+                }
+                Err(e) => eprintln!("upgrade error: {}", e),
+            }
+        });
+
+        *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        res.headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+        res.headers_mut()
+            .insert(UPGRADE, HeaderValue::from_static("websocket"));
+        res.headers_mut().insert(
+            SEC_WEBSOCKET_ACCEPT,
+            HeaderValue::from_str(&real_key).unwrap(),
+        );
+        res.headers_mut()
+            .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
+        Ok(res)
+    } else {
+        let mut res = Response::new(Body::empty());
+        *res.status_mut() = StatusCode::NOT_FOUND;
+        Ok(res)
+    }
 }
 
 #[tokio::main]

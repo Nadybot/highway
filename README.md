@@ -17,4 +17,17 @@ highway runs with sensible defaults, to override them, use enviroment variables:
 
 ## Connecting
 
-Clients can connect to `ws://highway/room-name`. We recommend encrypting the messages sent there with a shared secret key, so noone can read what is being sent apart from intended recipients.
+Clients can connect to rooms via `ws://highway/stream?rooms=["room1", "room2"]`.
+
+## Message format
+
+Any message not following this format gets ignored.
+
+```json
+{
+  "room": "room1",
+  "body": "my encrypted text"
+}
+```
+
+We recommend encrypting the body with a shared secret key, so noone can read what is being sent apart from intended recipients.
