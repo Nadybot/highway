@@ -1,5 +1,8 @@
 use async_tungstenite::{
-    tungstenite::{protocol::Role, Message},
+    tungstenite::{
+        protocol::{Role, WebSocketConfig},
+        Message,
+    },
     WebSocketStream,
 };
 use base64::encode;
@@ -43,7 +46,22 @@ async fn server_upgraded_io(
     // we have an upgraded connection that we can read and
     // write on directly.
     let compat = upgraded.compat();
-    let stream = WebSocketStream::from_raw_socket(compat, Role::Server, None).await;
+    let conf = WebSocketConfig {
+        max_send_queue: None,
+        max_message_size: Some(
+            var("MAX_MESSAGE_SIZE")
+                .unwrap_or(String::from("1048576"))
+                .parse()
+                .unwrap(),
+        ),
+        max_frame_size: Some(
+            var("MAX_FRAME_SIZE")
+                .unwrap_or(String::from("1048576"))
+                .parse()
+                .unwrap(),
+        ),
+    };
+    let stream = WebSocketStream::from_raw_socket(compat, Role::Server, Some(conf)).await;
     let (mut write, mut read) = stream.split();
     let id = Uuid::new_v4().to_string();
     let (tx, mut rx) = unbounded_channel();
