@@ -1,0 +1,162 @@
+name: Build binaries
+
+on:
+  push:
+    branches:
+      - unstable
+      - stable
+    tags:
+      - '*'
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Install cross compilers
+        run: |
+          sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf -y
+
+      - name: Set up Rust for x86_64
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - name: Build for x86_64
+        run: |
+          cargo build --release
+          cp target/release/aochatproxy aochatproxy-linux-x86_64
+
+      - name: Build SIMD x86_64
+        run: |
+          export RUSTFLAGS="-C target-cpu=haswell"
+          cargo build --release
+          cp target/release/aochatproxy aochatproxy-linux-x86_64-optimized
+
+      - name: Set up Rust for aarch64
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          target: aarch64-unknown-linux-gnu
+          override: true
+
+      - name: Build for aarch64
+        run: |
+          cargo build --release --target=aarch64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/aochatproxy aochatproxy-linux-aarch64
+
+      - name: Set up Rust for armv7
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          target: armv7-unknown-linux-gnueabihf
+          override: true
+
+      - name: Build for armv7
+        run: |
+          cargo build --release --target=armv7-unknown-linux-gnueabihf
+          cp target/armv7-unknown-linux-gnueabihf/release/aochatproxy aochatproxy-linux-armv7
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: aochatproxy-linux
+          path: |
+            aochatproxy-linux-x86_64
+            aochatproxy-linux-x86_64-optimized
+            aochatproxy-linux-aarch64
+            aochatproxy-linux-armv7
+
+  freebsd:
+    name: FreeBSD
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Install toolchain
+        run: |
+          sudo apt install llvm clang -y
+          mkdir freebsd_sysroot
+          curl -s https://download.freebsd.org/ftp/releases/amd64/12.2-RELEASE/base.txz \
+              | tar -xJf - -C freebsd_sysroot ./lib ./usr/lib ./usr/libdata ./usr/include ./usr/share/keys ./etc
+
+      - name: Set up Rust for FreeBSD x86_64
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          target: x86_64-unknown-freebsd
+          override: true
+
+      - name: Build for FreeBSD x86_64
+        run: |
+          cargo build --release --target=x86_64-unknown-freebsd
+          cp target/x86_64-unknown-freebsd/release/aochatproxy aochatproxy-freebsd-x86_64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: aochatproxy-freebsd
+          path: |
+            aochatproxy-freebsd-x86_64
+
+  macos:
+    name: MacOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - name: Build
+        run: |
+          cargo build --release
+          cp target/release/aochatproxy aochatproxy-macos
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: aochatproxy-macos
+          path: |
+            aochatproxy-macos
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - name: Build
+        run: |
+          cargo build --release
+          cp target/release/aochatproxy.exe aochatproxy-windows.exe
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: aochatproxy-windows
+          path: |
+            aochatproxy-windows.exe
