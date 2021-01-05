@@ -18,11 +18,13 @@ use hyper::{
     upgrade::Upgraded,
     Body, Request, Response, Server, StatusCode,
 };
+use leaky_bucket::LeakyBucket;
 use log::{debug, error, info};
 use sha1::Sha1;
 use tokio::{
     spawn,
     sync::mpsc::{unbounded_channel, UnboundedSender},
+    time::Duration,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use uuid::Uuid;
@@ -50,13 +52,13 @@ async fn server_upgraded_io(
         max_send_queue: None,
         max_message_size: Some(
             var("MAX_MESSAGE_SIZE")
-                .unwrap_or(String::from("1048576"))
+                .unwrap_or_else(|_| String::from("1048576"))
                 .parse()
                 .unwrap(),
         ),
         max_frame_size: Some(
             var("MAX_FRAME_SIZE")
-                .unwrap_or(String::from("1048576"))
+                .unwrap_or_else(|_| String::from("1048576"))
                 .parse()
                 .unwrap(),
         ),
@@ -65,6 +67,17 @@ async fn server_upgraded_io(
     let (mut write, mut read) = stream.split();
     let id = Uuid::new_v4().to_string();
     let (tx, mut rx) = unbounded_channel();
+    let msg_per_sec = var("MSG_PER_SEC")
+        .unwrap_or_else(|_| String::from("10"))
+        .parse()
+        .unwrap();
+    let ratelimiter = LeakyBucket::builder()
+        .max(msg_per_sec)
+        .tokens(msg_per_sec)
+        .refill_interval(Duration::from_secs(1))
+        .refill_amount(msg_per_sec)
+        .build()
+        .unwrap();
 
     if let Some(conns) = connections.get(&room) {
         conns.value().insert(id.clone(), tx);
@@ -85,9 +98,11 @@ async fn server_upgraded_io(
         while let Some(msg) = read.next().await {
             if let Ok(m) = msg {
                 debug!("Got websocket message: {:?}", m);
-                for recp in connections.get(&room).unwrap().value() {
-                    if recp.key() != &id {
-                        let _ = recp.value().send(m.clone());
+                if ratelimiter.acquire_one().await.is_ok() {
+                    for recp in connections.get(&room).unwrap().value() {
+                        if recp.key() != &id {
+                            let _ = recp.value().send(m.clone());
+                        }
                     }
                 }
             }
@@ -183,7 +198,10 @@ async fn main() {
     }
     env_logger::init();
 
-    let port: u16 = var("PORT").unwrap_or(String::from("3333")).parse().unwrap();
+    let port: u16 = var("PORT")
+        .unwrap_or_else(|_| String::from("3333"))
+        .parse()
+        .unwrap();
 
     let addr = ([0, 0, 0, 0], port).into();
 

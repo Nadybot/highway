@@ -6,8 +6,14 @@ highway is a concurrent, multithreaded websocket server. It allows clients to co
 
 ```sh
 cargo build --release
-PORT=3333 ./target/release/highway
+./target/release/highway
 ```
+
+highway runs with sensible defaults, to override them, use enviroment variables:
+
+- `PORT` sets the port to listen on (defaults to 3333)
+- `MAX_MESSAGE_SIZE` and `MAX_FRAME_SIZE` are byte values and set limits for the websocket payloads (defaults to 1MB)
+- `MSG_PER_SEC` sets how many messages a client may send per second (defaults to 10)
 
 ## Connecting
 
