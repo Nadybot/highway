@@ -37,14 +37,14 @@ jobs:
           shell: bash
           run: |
             docker build --file Dockerfile \
-              --tag "quay.io/nadyita/aochatproxy:${{steps.vars.outputs.tag}}" \
-              --tag "quay.io/nadyita/aochatproxy:${{steps.vars.outputs.branch}}" \
-              --tag "ghcr.io/nadybot/aochatproxy:${{steps.vars.outputs.tag}}" \
-              --tag "ghcr.io/nadybot/aochatproxy:${{steps.vars.outputs.branch}}" .
+              --tag "quay.io/nadyita/highway:${{steps.vars.outputs.tag}}" \
+              --tag "quay.io/nadyita/highway:${{steps.vars.outputs.branch}}" \
+              --tag "ghcr.io/nadybot/highway:${{steps.vars.outputs.tag}}" \
+              --tag "ghcr.io/nadybot/highway:${{steps.vars.outputs.branch}}" .
         - name: Push the tagged Docker image
           shell: bash
           run: |
-            docker push "quay.io/nadyita/aochatproxy:${{steps.vars.outputs.tag}}"
-            docker push "quay.io/nadyita/aochatproxy:${{steps.vars.outputs.branch}}"
-            docker push "ghcr.io/nadybot/aochatproxy:${{steps.vars.outputs.tag}}"
-            docker push "ghcr.io/nadybot/aochatproxy:${{steps.vars.outputs.branch}}"
+            docker push "quay.io/nadyita/highway:${{steps.vars.outputs.tag}}"
+            docker push "quay.io/nadyita/highway:${{steps.vars.outputs.branch}}"
+            docker push "ghcr.io/nadybot/highway:${{steps.vars.outputs.tag}}"
+            docker push "ghcr.io/nadybot/highway:${{steps.vars.outputs.branch}}"

@@ -31,13 +31,7 @@ jobs:
       - name: Build for x86_64
         run: |
           cargo build --release
-          cp target/release/aochatproxy aochatproxy-linux-x86_64
-
-      - name: Build SIMD x86_64
-        run: |
-          export RUSTFLAGS="-C target-cpu=haswell"
-          cargo build --release
-          cp target/release/aochatproxy aochatproxy-linux-x86_64-optimized
+          cp target/release/highway highway-linux-x86_64
 
       - name: Set up Rust for aarch64
         uses: actions-rs/toolchain@v1
@@ -50,7 +44,7 @@ jobs:
       - name: Build for aarch64
         run: |
           cargo build --release --target=aarch64-unknown-linux-gnu
-          cp target/aarch64-unknown-linux-gnu/release/aochatproxy aochatproxy-linux-aarch64
+          cp target/aarch64-unknown-linux-gnu/release/highway highway-linux-aarch64
 
       - name: Set up Rust for armv7
         uses: actions-rs/toolchain@v1
@@ -63,17 +57,16 @@ jobs:
       - name: Build for armv7
         run: |
           cargo build --release --target=armv7-unknown-linux-gnueabihf
-          cp target/armv7-unknown-linux-gnueabihf/release/aochatproxy aochatproxy-linux-armv7
+          cp target/armv7-unknown-linux-gnueabihf/release/highway highway-linux-armv7
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: aochatproxy-linux
+          name: highway-linux
           path: |
-            aochatproxy-linux-x86_64
-            aochatproxy-linux-x86_64-optimized
-            aochatproxy-linux-aarch64
-            aochatproxy-linux-armv7
+            highway-linux-x86_64
+            highway-linux-aarch64
+            highway-linux-armv7
 
   freebsd:
     name: FreeBSD
@@ -100,14 +93,14 @@ jobs:
       - name: Build for FreeBSD x86_64
         run: |
           cargo build --release --target=x86_64-unknown-freebsd
-          cp target/x86_64-unknown-freebsd/release/aochatproxy aochatproxy-freebsd-x86_64
+          cp target/x86_64-unknown-freebsd/release/highway highway-freebsd-x86_64
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: aochatproxy-freebsd
+          name: highway-freebsd
           path: |
-            aochatproxy-freebsd-x86_64
+            highway-freebsd-x86_64
 
   macos:
     name: MacOS
@@ -126,14 +119,14 @@ jobs:
       - name: Build
         run: |
           cargo build --release
-          cp target/release/aochatproxy aochatproxy-macos
+          cp target/release/highway highway-macos
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: aochatproxy-macos
+          name: highway-macos
           path: |
-            aochatproxy-macos
+            highway-macos
 
   windows:
     name: Windows
@@ -152,11 +145,11 @@ jobs:
       - name: Build
         run: |
           cargo build --release
-          cp target/release/aochatproxy.exe aochatproxy-windows.exe
+          cp target/release/highway.exe highway-windows.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: aochatproxy-windows
+          name: highway-windows
           path: |
-            aochatproxy-windows.exe
+            highway-windows.exe
