@@ -153,10 +153,9 @@ async fn server_upgrade(mut req: Request<Body>, connections: Arc<State>) -> Resu
     }
 
     let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{}{}", key.to_str().unwrap(), GUID));
-    let key_sha = hasher.finalize();
-    let real_key = encode(key_sha);
+    let real_key = encode(Sha1::digest(
+        format!("{}{}", key.to_str().unwrap(), GUID).as_bytes(),
+    ));
 
     // Setup a future that will eventually receive the upgraded
     // connection and talk a new protocol, and spawn the future
