@@ -6,7 +6,7 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-async-tungstenite = { version = "0.11", default-features = false }
+async-tungstenite = { version = "0.12", default-features = false }
 base64 = "0.13"
 dashmap = "4.0"
 env_logger = { version = "0.8", default-features = false, features = [
@@ -35,7 +35,10 @@ tokio-util = { version = "0.6", default-features = false, features = [
 futures-util = "0.3"
 qstring = "0.7"
 sha-1 = "0.9"
-uuid = { version = "0.8", features = ["v4"] }
+uuid = { version = "0.8", default-features = false, features = ["v4"] }
+
+[patch.crates-io]
+uuid = { git = "https://github.com/uuid-rs/uuid.git", default-features = false, features = ["v4"] }
 
 [features]
 simd = ["simd-json"]

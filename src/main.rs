@@ -61,6 +61,7 @@ async fn server_upgraded_io(
     // write on directly.
     let compat = upgraded.compat();
     let conf = WebSocketConfig {
+        accept_unmasked_frames: false,
         max_send_queue: None,
         max_message_size: Some(
             var("MAX_MESSAGE_SIZE")
