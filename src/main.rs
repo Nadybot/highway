@@ -47,7 +47,7 @@ const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 #[derive(Deserialize, Debug)]
 struct Payload {
     room: String,
-    body: String,
+    // do not deserialize other keys to save memory
 }
 
 /// Handle server-side I/O after HTTP upgraded.
@@ -107,43 +107,41 @@ async fn server_upgraded_io(
         }
     });
 
-    spawn(async move {
-        while let Some(msg) = read.next().await {
-            if let Ok(m) = msg {
-                let mut data = m.clone().into_data();
-                if let Ok(payload) = from_slice::<Payload>(&mut data) {
-                    debug!("Got websocket message: {:?}", payload);
-                    if rooms.iter().any(|i| i == &payload.room)
-                        && ratelimiter.acquire_one().await.is_ok()
-                    {
-                        for recp in connections.get(&payload.room).unwrap().value() {
-                            if recp.key() != &id {
-                                let _ = recp.value().send(m.clone());
-                            }
+    while let Some(msg) = read.next().await {
+        if let Ok(m) = msg {
+            let mut data = m.clone().into_data();
+            if let Ok(payload) = from_slice::<Payload>(&mut data) {
+                debug!("Got websocket message: {:?}", payload);
+                if rooms.iter().any(|i| i == &payload.room)
+                    && ratelimiter.acquire_one().await.is_ok()
+                {
+                    for recp in connections.get(&payload.room).unwrap().value() {
+                        if recp.key() != &id {
+                            let _ = recp.value().send(m.clone());
                         }
                     }
                 }
             }
         }
+    }
 
-        debug!("Cleaning up websocket");
-        // Cleanup handler
-        for room in rooms.iter() {
-            let conns = connections.get(room);
-            if let Some(c) = conns {
-                if c.len() == 1 {
-                    drop(c);
-                    debug!("Deleting room");
-                    connections.remove(room);
-                } else {
-                    debug!("Leaving room");
-                    c.value().remove(&id);
-                }
-
-                debug!("Rooms: {:?}", connections);
+    debug!("Cleaning up websocket");
+    // Cleanup handler
+    for room in rooms.iter() {
+        let conns = connections.get(room);
+        if let Some(c) = conns {
+            if c.len() == 1 {
+                drop(c);
+                debug!("Deleting room");
+                connections.remove(room);
+            } else {
+                debug!("Leaving room");
+                c.value().remove(&id);
             }
+
+            debug!("Rooms: {:?}", connections);
         }
-    });
+    }
 
     Ok(())
 }
