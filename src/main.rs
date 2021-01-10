@@ -1,10 +1,3 @@
-use async_tungstenite::{
-    tungstenite::{
-        protocol::{Role, WebSocketConfig},
-        Message,
-    },
-    WebSocketStream,
-};
 use base64::encode;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
@@ -32,7 +25,13 @@ use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedSender},
     time::Duration,
 };
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_tungstenite::{
+    tungstenite::{
+        protocol::{Role, WebSocketConfig},
+        Message,
+    },
+    WebSocketStream,
+};
 use uuid::Uuid;
 
 use std::{
@@ -59,7 +58,6 @@ async fn server_upgraded_io(
 ) -> Result<()> {
     // we have an upgraded connection that we can read and
     // write on directly.
-    let compat = upgraded.compat();
     let conf = WebSocketConfig {
         accept_unmasked_frames: false,
         max_send_queue: None,
@@ -76,7 +74,7 @@ async fn server_upgraded_io(
                 .unwrap(),
         ),
     };
-    let stream = WebSocketStream::from_raw_socket(compat, Role::Server, Some(conf)).await;
+    let stream = WebSocketStream::from_raw_socket(upgraded, Role::Server, Some(conf)).await;
     let (mut write, mut read) = stream.split();
     let id = Uuid::new_v4().to_string();
     let (tx, mut rx) = unbounded_channel();
