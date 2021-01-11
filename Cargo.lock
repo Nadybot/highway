@@ -248,10 +248,12 @@ name = "highway"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "dashmap",
  "env_logger",
  "futures-util",
  "hyper",
+ "lazy_static",
  "leaky-bucket",
  "log",
  "qstring",
