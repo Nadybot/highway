@@ -34,9 +34,6 @@ qstring = "0.7"
 sha-1 = "0.9"
 uuid = { version = "0.8", default-features = false, features = ["v4"] }
 
-[patch.crates-io]
-uuid = { git = "https://github.com/uuid-rs/uuid.git", default-features = false, features = ["v4"] }
-
 [features]
 simd = ["simd-json"]
 
