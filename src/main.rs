@@ -126,7 +126,8 @@ async fn connection_handler(
     let (mut write, mut read) = stream.split();
     let id = Uuid::new_v4().to_string();
     let (tx, mut rx) = unbounded_channel();
-    let ratelimiter = constants::get_ratelimiter();
+    let freq_ratelimiter = constants::get_freq_ratelimiter();
+    let size_ratelimiter = constants::get_size_ratelimiter();
 
     for room in rooms.iter() {
         if let Some(conns) = connections.get(room) {
@@ -151,7 +152,8 @@ async fn connection_handler(
             if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
                 debug!("Got websocket message: {:?}", payload);
                 if rooms.iter().any(|i| i == &payload.room)
-                    && ratelimiter.acquire_one().await.is_ok()
+                    && freq_ratelimiter.acquire_one().await.is_ok()
+                    && size_ratelimiter.acquire(data.len()).await.is_ok()
                 {
                     for recp in connections.get(&payload.room).unwrap().value() {
                         if recp.key() != &id {

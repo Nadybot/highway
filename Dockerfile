@@ -35,14 +35,14 @@ COPY .cargo ./.cargo/
 RUN mkdir src/
 RUN echo 'fn main() {}' > ./src/main.rs
 RUN source $HOME/.cargo/env && \
-    cargo build --release \
+    cargo build --release --features simd \
         --target="$RUST_TARGET"
 
 RUN rm -f target/$RUST_TARGET/release/deps/highway*
 COPY ./src ./src
 
 RUN source $HOME/.cargo/env && \
-    cargo build --release \
+    cargo build --release --features simd \
         --target="$RUST_TARGET" && \
     cp target/$RUST_TARGET/release/highway /highway && \
     actual-strip /highway

@@ -1,7 +1,7 @@
 use crate::json::to_vec;
 
 use lazy_static::lazy_static;
-use leaky_bucket::LeakyBucket;
+use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
@@ -51,7 +51,7 @@ pub fn is_valid_room(room: &str) -> bool {
     PUBLIC_CHANNELS.iter().any(|i| *i == room) || room.len() >= MIN_PRIV_ROOM_LEN
 }
 
-pub fn get_ratelimiter() -> LeakyBucket {
+pub fn get_freq_ratelimiter() -> LeakyBucket {
     let msg_per_sec = var("MSG_PER_SEC")
         .unwrap_or_else(|_| String::from("10"))
         .parse()
@@ -62,5 +62,17 @@ pub fn get_ratelimiter() -> LeakyBucket {
         .refill_interval(Duration::from_secs(1))
         .refill_amount(msg_per_sec)
         .build()
-        .unwrap()
+}
+
+pub fn get_size_ratelimiter() -> LeakyBucket {
+    let bytes_per_10_seconds = var("BYTES_PER_10_SEC")
+        .unwrap_or_else(|_| String::from("5242880"))
+        .parse()
+        .unwrap();
+    LeakyBucket::builder()
+        .max(bytes_per_10_seconds)
+        .tokens(bytes_per_10_seconds)
+        .refill_interval(Duration::from_secs(10))
+        .refill_amount(bytes_per_10_seconds)
+        .build()
 }
