@@ -9,7 +9,6 @@ edition = "2018"
 tokio-tungstenite = { version = "0.13", default-features = false, features = ["connect"] }
 base64 = "0.13"
 bytes = "1.0"
-dashmap = "4.0"
 env_logger = { version = "0.8", default-features = false, features = [
     "termcolor",
     "atty",

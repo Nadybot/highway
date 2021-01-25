@@ -8,6 +8,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use std::{collections::HashSet, env::var};
 
 pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to send a message to a room that you are not subscribed to\"}";
+pub const INVALID_JSON_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to send a message that was not valid JSON or did not have a room specified\"}";
 const MIN_PRIV_ROOM_LEN: usize = 32;
 
 lazy_static! {
