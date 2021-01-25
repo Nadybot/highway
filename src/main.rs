@@ -11,14 +11,13 @@ use hyper::{
         UPGRADE,
     },
     service::{make_service_fn, service_fn},
-    upgrade,
-    upgrade::Upgraded,
-    Body, Client, Method, Request, Response, Server, StatusCode,
+    upgrade, Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use log::{debug, error, info};
 use qstring::QString;
 use sha1::{Digest, Sha1};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     spawn,
     sync::{
         broadcast::{channel, Sender},
@@ -34,7 +33,10 @@ use tokio_tungstenite::{
 use std::{
     env::{set_var, var},
     io::Read,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 mod constants;
@@ -42,9 +44,8 @@ mod error;
 mod json;
 mod model;
 
-// A simple type alias so as to DRY.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type State = DashMap<String, Sender<Message>>;
+type State = DashMap<String, (Sender<Message>, AtomicUsize)>;
 
 async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
     let http_client = Client::new();
@@ -60,69 +61,18 @@ async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
     let (conn, _) = connect_async(format!("ws://{}/stream?{}", addr, query)).await?;
     let rooms: Vec<String> = from_str(&mut rooms)?;
 
-    let (mut write, mut read) = conn.split();
-    let (write_handle, mut read_handle) = unbounded_channel();
-
-    spawn(async move {
-        while let Some(msg) = read_handle.recv().await {
-            debug!("Sending websocket message: {:?}", msg);
-            let _ = write.send(msg).await;
-        }
-    });
-
-    for room in rooms.iter() {
-        let mut rx = if let Some(conns) = connections.get(room) {
-            let tx = conns.value().clone();
-            let rx = tx.subscribe();
-            rx
-        } else {
-            let (tx, rx) = channel(100);
-            connections.insert(room.clone(), tx.clone());
-            rx
-        };
-
-        let wh = write_handle.clone();
-        spawn(async move {
-            while let Ok(msg) = rx.recv().await {
-                let _ = wh.send(msg);
-            }
-        });
-    }
-
-    while let Some(msg) = read.next().await {
-        if let Ok(m) = msg {
-            let mut data = m.clone().into_data();
-            if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
-                debug!("Got websocket message: {:?}", payload);
-                if rooms.iter().any(|i| i == &payload.room) {
-                    let _ = connections
-                        .get(&payload.room)
-                        .unwrap()
-                        .value()
-                        .send(m.clone());
-                }
-            }
-        }
-    }
-
-    debug!("Cleaning up websocket");
-    for room in rooms.iter() {
-        let conns = connections.get(room);
-        if let Some(_) = conns {
-            debug!("Rooms: {:?}", connections);
-        }
-    }
-
-    Ok(())
+    connection_handler(conn, rooms, connections, true).await
 }
 
-async fn connection_handler(
-    upgraded: Upgraded,
+async fn connection_handler<S: 'static>(
+    conn: WebSocketStream<S>,
     rooms: Vec<String>,
     connections: Arc<State>,
-) -> Result<()> {
-    let conn =
-        WebSocketStream::from_raw_socket(upgraded, Role::Server, Some(*constants::CONFIG)).await;
+    relaying: bool,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let freq_ratelimiter = constants::get_freq_ratelimiter();
     let size_ratelimiter = constants::get_size_ratelimiter();
 
@@ -137,13 +87,13 @@ async fn connection_handler(
     });
 
     for room in rooms.iter() {
-        let mut rx = if let Some(conns) = connections.get(room) {
-            let tx = conns.value().clone();
-            let rx = tx.subscribe();
-            rx
+        let mut rx = if let Some(conn) = connections.get(room) {
+            let (tx, counter) = conn.value().clone();
+            counter.fetch_add(1, Ordering::Relaxed);
+            tx.subscribe()
         } else {
             let (tx, rx) = channel(100);
-            connections.insert(room.clone(), tx.clone());
+            connections.insert(room.clone(), (tx.clone(), AtomicUsize::new(1)));
             rx
         };
 
@@ -160,15 +110,12 @@ async fn connection_handler(
             let mut data = m.clone().into_data();
             if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
                 debug!("Got websocket message: {:?}", payload);
-                if rooms.iter().any(|i| i == &payload.room)
-                    && freq_ratelimiter.acquire_one().await.is_ok()
-                    && size_ratelimiter.acquire(data.len()).await.is_ok()
-                {
-                    let _ = connections
-                        .get(&payload.room)
-                        .unwrap()
-                        .value()
-                        .send(m.clone());
+                if !relaying {
+                    let _ = freq_ratelimiter.acquire_one().await;
+                    let _ = size_ratelimiter.acquire(data.len()).await;
+                }
+                if rooms.iter().any(|i| i == &payload.room) {
+                    let _ = connections.get(&payload.room).unwrap().value().0.send(m);
                 }
             }
         }
@@ -176,9 +123,14 @@ async fn connection_handler(
 
     debug!("Cleaning up websocket");
     for room in rooms.iter() {
-        let conns = connections.get(room);
-        if let Some(_) = conns {
-            debug!("Rooms: {:?}", connections);
+        let conns = connections
+            .get(room)
+            .expect("Should never be None at this stage");
+        debug!("Leaving room");
+        let new = conns.1.fetch_sub(1, Ordering::Relaxed);
+        if new == 1 {
+            debug!("Deleting room");
+            connections.remove(room);
         }
     }
 
@@ -225,7 +177,13 @@ async fn handle_connection(
     spawn(async move {
         match upgrade::on(&mut req).await {
             Ok(upgraded) => {
-                if let Err(e) = connection_handler(upgraded, rooms, connections).await {
+                let conn = WebSocketStream::from_raw_socket(
+                    upgraded,
+                    Role::Server,
+                    Some(*constants::CONFIG),
+                )
+                .await;
+                if let Err(e) = connection_handler(conn, rooms, connections, false).await {
                     error!("Server websocket io error: {}", e)
                 };
             }
