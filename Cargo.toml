@@ -27,14 +27,13 @@ simd-json = { version = "0.3", default-features = false, features = [
     "neon",
     "serde_impl"
 ], optional = true }
-tokio = { version = "1.0", default-features = false, features = [
+tokio = { version = "1.1", default-features = false, features = [
     "rt-multi-thread",
     "macros"
 ] }
 futures-util = "0.3"
 qstring = "0.7"
 sha-1 = "0.9"
-uuid = { version = "0.8", default-features = false, features = ["v4"] }
 
 [features]
 simd = ["simd-json"]

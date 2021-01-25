@@ -20,14 +20,16 @@ use qstring::QString;
 use sha1::{Digest, Sha1};
 use tokio::{
     spawn,
-    sync::mpsc::{unbounded_channel, UnboundedSender},
+    sync::{
+        broadcast::{channel, Sender},
+        mpsc::unbounded_channel,
+    },
 };
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{protocol::Role, Message},
     WebSocketStream,
 };
-use uuid::Uuid;
 
 use std::{
     env::{set_var, var},
@@ -42,7 +44,7 @@ mod model;
 
 // A simple type alias so as to DRY.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type State = DashMap<String, DashMap<String, UnboundedSender<Message>>>;
+type State = DashMap<String, Sender<Message>>;
 
 async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
     let http_client = Client::new();
@@ -57,27 +59,35 @@ async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
     let query = QString::new(vec![("rooms", &rooms)]);
     let (conn, _) = connect_async(format!("ws://{}/stream?{}", addr, query)).await?;
     let rooms: Vec<String> = from_str(&mut rooms)?;
-    let id = Uuid::new_v4().to_string();
 
     let (mut write, mut read) = conn.split();
-    let (tx, mut rx) = unbounded_channel();
-
-    for room in rooms.iter() {
-        if let Some(conns) = connections.get(room) {
-            conns.value().insert(id.clone(), tx.clone());
-        } else {
-            let map = DashMap::new();
-            map.insert(id.clone(), tx.clone());
-            connections.insert(room.clone(), map);
-        }
-    }
+    let (write_handle, mut read_handle) = unbounded_channel();
 
     spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = read_handle.recv().await {
             debug!("Sending websocket message: {:?}", msg);
             let _ = write.send(msg).await;
         }
     });
+
+    for room in rooms.iter() {
+        let mut rx = if let Some(conns) = connections.get(room) {
+            let tx = conns.value().clone();
+            let rx = tx.subscribe();
+            rx
+        } else {
+            let (tx, rx) = channel(100);
+            connections.insert(room.clone(), tx.clone());
+            rx
+        };
+
+        let wh = write_handle.clone();
+        spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                let _ = wh.send(msg);
+            }
+        });
+    }
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
@@ -85,30 +95,20 @@ async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
             if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
                 debug!("Got websocket message: {:?}", payload);
                 if rooms.iter().any(|i| i == &payload.room) {
-                    for recp in connections.get(&payload.room).unwrap().value() {
-                        if recp.key() != &id {
-                            let _ = recp.value().send(m.clone());
-                        }
-                    }
+                    let _ = connections
+                        .get(&payload.room)
+                        .unwrap()
+                        .value()
+                        .send(m.clone());
                 }
             }
         }
     }
 
     debug!("Cleaning up websocket");
-    // Cleanup handler
     for room in rooms.iter() {
         let conns = connections.get(room);
-        if let Some(c) = conns {
-            if c.len() == 1 {
-                drop(c);
-                debug!("Deleting room");
-                connections.remove(room);
-            } else {
-                debug!("Leaving room");
-                c.value().remove(&id);
-            }
-
+        if let Some(_) = conns {
             debug!("Rooms: {:?}", connections);
         }
     }
@@ -121,30 +121,39 @@ async fn connection_handler(
     rooms: Vec<String>,
     connections: Arc<State>,
 ) -> Result<()> {
-    let stream =
+    let conn =
         WebSocketStream::from_raw_socket(upgraded, Role::Server, Some(*constants::CONFIG)).await;
-    let (mut write, mut read) = stream.split();
-    let id = Uuid::new_v4().to_string();
-    let (tx, mut rx) = unbounded_channel();
     let freq_ratelimiter = constants::get_freq_ratelimiter();
     let size_ratelimiter = constants::get_size_ratelimiter();
 
-    for room in rooms.iter() {
-        if let Some(conns) = connections.get(room) {
-            conns.value().insert(id.clone(), tx.clone());
-        } else {
-            let map = DashMap::new();
-            map.insert(id.clone(), tx.clone());
-            connections.insert(room.clone(), map);
-        }
-    }
+    let (mut write, mut read) = conn.split();
+    let (write_handle, mut read_handle) = unbounded_channel();
 
     spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = read_handle.recv().await {
             debug!("Sending websocket message: {:?}", msg);
             let _ = write.send(msg).await;
         }
     });
+
+    for room in rooms.iter() {
+        let mut rx = if let Some(conns) = connections.get(room) {
+            let tx = conns.value().clone();
+            let rx = tx.subscribe();
+            rx
+        } else {
+            let (tx, rx) = channel(100);
+            connections.insert(room.clone(), tx.clone());
+            rx
+        };
+
+        let wh = write_handle.clone();
+        spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                let _ = wh.send(msg);
+            }
+        });
+    }
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
@@ -155,30 +164,20 @@ async fn connection_handler(
                     && freq_ratelimiter.acquire_one().await.is_ok()
                     && size_ratelimiter.acquire(data.len()).await.is_ok()
                 {
-                    for recp in connections.get(&payload.room).unwrap().value() {
-                        if recp.key() != &id {
-                            let _ = recp.value().send(m.clone());
-                        }
-                    }
+                    let _ = connections
+                        .get(&payload.room)
+                        .unwrap()
+                        .value()
+                        .send(m.clone());
                 }
             }
         }
     }
 
     debug!("Cleaning up websocket");
-    // Cleanup handler
     for room in rooms.iter() {
         let conns = connections.get(room);
-        if let Some(c) = conns {
-            if c.len() == 1 {
-                drop(c);
-                debug!("Deleting room");
-                connections.remove(room);
-            } else {
-                debug!("Leaving room");
-                c.value().remove(&id);
-            }
-
+        if let Some(_) = conns {
             debug!("Rooms: {:?}", connections);
         }
     }
