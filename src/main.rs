@@ -1,77 +1,58 @@
-use crate::json::{from_slice, from_str};
+use crate::json::from_slice;
 
-use base64::encode;
-use bytes::Buf;
-use dashmap::DashMap;
+use dashmap::DashSet;
 use futures_util::{SinkExt, StreamExt};
-use hyper::{
-    body::aggregate,
-    header::{
-        HeaderValue, CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION,
-        UPGRADE,
-    },
-    service::{make_service_fn, service_fn},
-    upgrade,
-    upgrade::Upgraded,
-    Body, Client, Method, Request, Response, Server, StatusCode,
-};
 use log::{debug, error, info};
-use qstring::QString;
-use sha1::{Digest, Sha1};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::{TcpListener, TcpStream},
     spawn,
-    sync::mpsc::{unbounded_channel, UnboundedSender},
+    sync::{
+        broadcast::{channel, Sender},
+        mpsc::unbounded_channel,
+    },
 };
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{protocol::Role, Message},
+    accept_async_with_config, connect_async,
+    tungstenite::{Error, Message},
     WebSocketStream,
 };
-use uuid::Uuid;
 
 use std::{
     env::{set_var, var},
-    io::Read,
+    io::Error as IoError,
+    net::SocketAddr,
     sync::Arc,
 };
 
 mod constants;
-mod error;
 mod json;
 mod model;
 
-// A simple type alias so as to DRY.
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type State = DashMap<String, DashMap<String, UnboundedSender<Message>>>;
+type Broadcast = Sender<model::InternalMessage>;
 
-async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
-    let http_client = Client::new();
-    let body = aggregate(
-        http_client
-            .get(format!("http://{}/public-channels", addr).parse()?)
-            .await?,
-    )
-    .await?;
-    let mut rooms = String::new();
-    body.reader().read_to_string(&mut rooms)?;
-    let query = QString::new(vec![("rooms", &rooms)]);
-    let (conn, _) = connect_async(format!("ws://{}/stream?{}", addr, query)).await?;
-    let rooms: Vec<String> = from_str(&mut rooms)?;
-    let id = Uuid::new_v4().to_string();
+async fn relay_from(source: &str, broadcast: Broadcast) -> Result<(), Error> {
+    let (stream, _) = connect_async(source).await?;
+    worker(stream, broadcast, true).await;
+    Ok(())
+}
+
+async fn worker<S: 'static>(conn: WebSocketStream<S>, broadcast: Broadcast, relaying: bool)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let freq_ratelimiter = constants::get_freq_ratelimiter();
+    let size_ratelimiter = constants::get_size_ratelimiter();
+    let mut receiver = broadcast.subscribe();
+    let rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
 
     let (mut write, mut read) = conn.split();
     let (tx, mut rx) = unbounded_channel();
 
-    for room in rooms.iter() {
-        if let Some(conns) = connections.get(room) {
-            conns.value().insert(id.clone(), tx.clone());
-        } else {
-            let map = DashMap::new();
-            map.insert(id.clone(), tx.clone());
-            connections.insert(room.clone(), map);
-        }
-    }
+    // Set of IDs that a relaying client is awaiting replies for
+    let awaiting_reply = Arc::new(DashSet::new());
 
+    let listen_rooms = rooms.clone();
     spawn(async move {
         while let Some(msg) = rx.recv().await {
             debug!("Sending websocket message: {:?}", msg);
@@ -79,199 +60,124 @@ async fn relay_from(addr: String, connections: Arc<State>) -> Result<()> {
         }
     });
 
-    while let Some(msg) = read.next().await {
-        if let Ok(m) = msg {
-            let mut data = m.clone().into_data();
-            if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
-                debug!("Got websocket message: {:?}", payload);
-                if rooms.iter().any(|i| i == &payload.room) {
-                    for recp in connections.get(&payload.room).unwrap().value() {
-                        if recp.key() != &id {
-                            let _ = recp.value().send(m.clone());
-                        }
-                    }
+    let send_tx = tx.clone();
+    let replies = awaiting_reply.clone();
+    spawn(async move {
+        while let Ok(msg) = receiver.recv().await {
+            if let model::Payload::Message(m) = msg.payload {
+                if (relaying && msg.was_relayed) || (!relaying && !listen_rooms.contains(&m.room)) {
+                    continue;
+                }
+                if relaying {
+                    replies.insert(m.id);
                 }
             }
-        }
-    }
-
-    debug!("Cleaning up websocket");
-    // Cleanup handler
-    for room in rooms.iter() {
-        let conns = connections.get(room);
-        if let Some(c) = conns {
-            if c.len() == 1 {
-                drop(c);
-                debug!("Deleting room");
-                connections.remove(room);
-            } else {
-                debug!("Leaving room");
-                c.value().remove(&id);
-            }
-
-            debug!("Rooms: {:?}", connections);
-        }
-    }
-
-    Ok(())
-}
-
-async fn connection_handler(
-    upgraded: Upgraded,
-    rooms: Vec<String>,
-    connections: Arc<State>,
-) -> Result<()> {
-    let stream =
-        WebSocketStream::from_raw_socket(upgraded, Role::Server, Some(*constants::CONFIG)).await;
-    let (mut write, mut read) = stream.split();
-    let id = Uuid::new_v4().to_string();
-    let (tx, mut rx) = unbounded_channel();
-    let freq_ratelimiter = constants::get_freq_ratelimiter();
-    let size_ratelimiter = constants::get_size_ratelimiter();
-
-    for room in rooms.iter() {
-        if let Some(conns) = connections.get(room) {
-            conns.value().insert(id.clone(), tx.clone());
-        } else {
-            let map = DashMap::new();
-            map.insert(id.clone(), tx.clone());
-            connections.insert(room.clone(), map);
-        }
-    }
-
-    spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            debug!("Sending websocket message: {:?}", msg);
-            let _ = write.send(msg).await;
+            let _ = send_tx.send(msg.tungstenite_message);
         }
     });
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
-            let mut data = m.clone().into_data();
-            if let Ok(payload) = from_slice::<model::Payload>(&mut data) {
-                debug!("Got websocket message: {:?}", payload);
-                if rooms.iter().any(|i| i == &payload.room)
-                    && freq_ratelimiter.acquire_one().await.is_ok()
-                    && size_ratelimiter.acquire(data.len()).await.is_ok()
-                {
-                    for recp in connections.get(&payload.room).unwrap().value() {
-                        if recp.key() != &id {
-                            let _ = recp.value().send(m.clone());
+            let amt = m.len();
+            debug!("{:?}", m);
+            match from_slice::<model::Payload>(&mut m.clone().into_data()) {
+                Ok(payload) => match &payload {
+                    model::Payload::Message(msg) => {
+                        if !relaying {
+                            let _ = freq_ratelimiter.acquire_one().await;
+                            let _ = size_ratelimiter.acquire(amt).await;
+                        } else {
+                            let existed = awaiting_reply.remove(&msg.id).is_some();
+                            if existed {
+                                continue;
+                            }
+                        }
+
+                        if rooms.contains(&msg.room) || relaying {
+                            let msg = model::InternalMessage {
+                                payload,
+                                was_relayed: relaying,
+                                tungstenite_message: m,
+                            };
+                            let _ = broadcast.send(msg);
+                        } else {
+                            let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
                         }
                     }
+                    model::Payload::Command(cmd) => match cmd {
+                        model::Command::Join(j) => {
+                            if constants::is_valid_room(&j.room) {
+                                rooms.insert(j.room.clone());
+                                let _ =
+                                    tx.send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
+                            } else {
+                                let _ =
+                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                            }
+                        }
+                        model::Command::Leave(l) => {
+                            let was_in_room = rooms.remove(&l.room).is_some();
+                            if was_in_room {
+                                let _ =
+                                    tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
+                            } else {
+                                let _ =
+                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                            }
+                        }
+                        model::Command::Hello(h) if relaying => {
+                            for room in &h.public_rooms {
+                                let msg = Message::Text(constants::get_join_payload(room));
+                                let _ = tx.send(msg);
+                            }
+                        }
+                        model::Command::NewPublicRoom(p) if relaying => {
+                            constants::PUBLIC_CHANNELS.insert(p.room.clone());
+                            let msg = Message::Text(constants::get_join_payload(&p.room));
+                            let _ = tx.send(msg);
+                            let msg = model::InternalMessage {
+                                payload,
+                                was_relayed: true,
+                                tungstenite_message: m,
+                            };
+                            let _ = broadcast.send(msg);
+                        }
+                        _ => {
+                            let _ = tx.send(Message::Text(constants::INVALID_CMD_MSG.to_string()));
+                        }
+                    },
+                    // Ignore success and error messages
+                    _ => {}
+                },
+                Err(e) => {
+                    debug!("Error in JSON: {:?}", e);
+                    let _ = tx.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
                 }
             }
         }
     }
 
-    debug!("Cleaning up websocket");
-    // Cleanup handler
-    for room in rooms.iter() {
-        let conns = connections.get(room);
-        if let Some(c) = conns {
-            if c.len() == 1 {
-                drop(c);
-                debug!("Deleting room");
-                connections.remove(room);
-            } else {
-                debug!("Leaving room");
-                c.value().remove(&id);
-            }
-
-            debug!("Rooms: {:?}", connections);
-        }
-    }
-
-    Ok(())
+    info!("Connection to {:?} closed", rooms);
 }
 
-/// Our server HTTP handler to initiate HTTP upgrades.
 async fn handle_connection(
-    mut req: Request<Body>,
-    connections: Arc<State>,
-) -> Result<Response<Body>> {
-    let mut res = Response::new(Body::empty());
-    let query = QString::from(req.uri().query().unwrap_or_default());
-    let mut rooms = query.get("rooms").unwrap_or_default().to_string();
+    raw_stream: TcpStream,
+    addr: SocketAddr,
+    broadcast: Broadcast,
+) -> Result<(), Error> {
+    info!("Incoming connection from {:?}", addr);
+    let mut ws_stream = accept_async_with_config(raw_stream, Some(*constants::CONFIG)).await?;
+    ws_stream
+        .send(Message::Text(constants::get_hello_payload()))
+        .await?;
 
-    let rooms = from_str::<Vec<String>>(&mut rooms)?;
-    if rooms.iter().any(|r| !constants::is_valid_room(r)) {
-        return Err(Box::new(error::RequestError::InvalidRoom));
-    }
+    worker(ws_stream, broadcast, false).await;
 
-    info!("Incoming connection to {:?}", &rooms);
-
-    // Send a 400 to any request that doesn't have
-    // an `Upgrade` header.
-    if !req.headers().contains_key(UPGRADE)
-        || !req.headers().contains_key(SEC_WEBSOCKET_KEY)
-        || rooms.is_empty()
-    {
-        return Err(Box::new(error::RequestError::NotWebsocket));
-    }
-
-    let upgrade = req.headers().get(UPGRADE).unwrap();
-
-    if upgrade.to_str().unwrap() != "websocket" {
-        return Err(Box::new(error::RequestError::NotWebsocket));
-    }
-
-    let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
-    let real_key = encode(Sha1::digest(
-        format!("{}{}", key.to_str().unwrap(), constants::GUID).as_bytes(),
-    ));
-
-    // Start the upgrade handler
-    spawn(async move {
-        match upgrade::on(&mut req).await {
-            Ok(upgraded) => {
-                if let Err(e) = connection_handler(upgraded, rooms, connections).await {
-                    error!("Server websocket io error: {}", e)
-                };
-            }
-            Err(e) => error!("Upgrade error: {}", e),
-        }
-    });
-
-    *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    res.headers_mut()
-        .insert(CONNECTION, HeaderValue::from_static("Upgrade"));
-    res.headers_mut()
-        .insert(UPGRADE, HeaderValue::from_static("websocket"));
-    res.headers_mut().insert(
-        SEC_WEBSOCKET_ACCEPT,
-        HeaderValue::from_str(&real_key).unwrap(),
-    );
-    res.headers_mut()
-        .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
-    Ok(res)
-}
-
-async fn request_handler(req: Request<Body>, connections: Arc<State>) -> Result<Response<Body>> {
-    info!("{} request to {}", req.method(), req.uri().path());
-
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/public-channels") => Ok(Response::new(Body::from(
-            &*constants::PUBLIC_CHANNELS_SERIALIZED.as_slice(),
-        ))),
-        (&Method::GET, "/stream") => match handle_connection(req, connections).await {
-            // Err means the request was invalid and not a websocket connection
-            Ok(r) => Ok(r),
-            Err(_) => Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::empty())
-                .unwrap()),
-        },
-        _ => Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .unwrap()),
-    }
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), IoError> {
     if var("RUST_LOG").is_err() {
         set_var("RUST_LOG", "info");
     }
@@ -282,30 +188,26 @@ async fn main() {
         .parse()
         .unwrap();
 
-    let addr = ([0, 0, 0, 0], port).into();
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    let connections: Arc<State> = Arc::new(DashMap::new());
+    let (broadcast, _) = channel(1000);
 
     if let Ok(s) = var("RELAY_SOURCE") {
-        let conns = connections.clone();
+        let b = broadcast.clone();
         spawn(async move {
-            if let Err(e) = relay_from(s, conns).await {
+            if let Err(e) = relay_from(&s, b).await {
                 error!("Relay failed: {}", e);
             };
         });
     }
 
-    let make_service = make_service_fn(move |_| {
-        let conns = connections.clone();
+    let try_socket = TcpListener::bind(&addr).await;
+    let listener = try_socket.expect("Failed to bind");
+    info!("Listening on: {}", addr);
 
-        async move { Ok::<_, hyper::Error>(service_fn(move |req| request_handler(req, conns.clone()))) }
-    });
-
-    let server = Server::bind(&addr).serve(make_service);
-
-    info!("Listening on port {}", port);
-
-    if let Err(e) = server.await {
-        error!("Server error: {}", e);
+    while let Ok((stream, addr)) = listener.accept().await {
+        tokio::spawn(handle_connection(stream, addr, broadcast.clone()));
     }
+
+    Ok(())
 }

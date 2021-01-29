@@ -18,17 +18,43 @@ highway runs with sensible defaults, to override them, use enviroment variables:
 
 ## Connecting
 
-Clients can connect to rooms via `ws://highway/stream?rooms=["room1", "room2"]`.
+Clients can connect at `ws://highway`.
 
 ## Message format
 
-Any message not following this format gets ignored.
+Each payload needs to be valid JSON and contain a `type` key that is either `command`, `message`, `success` or `error`.
+Read more about these types below.
+
+## Command
+
+The command type requires an additional field called `cmd` with the value being `subscribe`, `unsubscribe`, `hello` or `new-public-room`. The latter two are read-only, i.e. only the server will send them.
+
+`subscribe`, `unsubscribe` and `new-public-room` have a `room` field with the value being the room to join/leave/that was created.
+
+Example:
 
 ```json
 {
-  "room": "room1",
-  "body": "my encrypted text"
+  "type": "command",
+  "cmd": "subscribe",
+  "room": "pvp"
 }
 ```
 
+would join the `pvp` room.
+
+`hello` is sent when the client connects and has an array field `public-rooms` with a list of public rooms available.
+
+## Message
+
+Messages are the core of the server and require at _least_ two more fields: `id` and `room`. `room` is the room where the message will be sent to and `id` should be a unique identifier for the message (like a UUID).
+
+Anything else is optional and is up to the client, for example `body` or `content`-like keys.
+
 We recommend encrypting the body with a shared secret key, so noone can read what is being sent apart from intended recipients.
+
+When a message is sent to the server, the client will get it echo'ed back. Ensuring you track the ID is crucial to avoid parsing it by accident.
+
+## Success and Error
+
+`success` and `error` both have a `message` field that explains what was done/failed to be done. They contain useful information like invalid JSON, invalid rooms or room join confirmations.
