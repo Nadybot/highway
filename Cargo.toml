@@ -6,31 +6,32 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-tokio-tungstenite = { version = "0.13", default-features = false, features = ["connect"] }
+tokio-tungstenite = { git = "https://github.com/Gelbpunkt/tokio-tungstenite", default-features = false, features = ["connect"] }
 dashmap = "4.0"
 env_logger = { version = "0.8", default-features = false, features = [
     "termcolor",
     "atty",
     "humantime"
 ] }
-once_cell = "1.5"
+once_cell = "1.7"
 leaky-bucket-lite = "0.1"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-simd-json = { version = "0.3", default-features = false, features = [
+serde_json = { version = "1.0", optional = true }
+simd-json = { version = "0.4", default-features = false, features = [
     "allow-non-simd",
     "known-key",
-    "neon",
     "serde_impl"
 ], optional = true }
-tokio = { version = "1.1", default-features = false, features = [
+tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros"
 ] }
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false }
 
 [features]
+default = ["no-simd"]
+no-simd = ["serde_json"]
 simd = ["simd-json"]
 
 [profile.release]
