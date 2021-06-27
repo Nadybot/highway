@@ -27,9 +27,9 @@ Read more about these types below.
 
 ## Command
 
-The command type requires an additional field called `cmd` with the value being `subscribe`, `unsubscribe`, `hello` or `new-public-room`. The latter two are read-only, i.e. only the server will send them.
+The command type requires an additional field called `cmd` with the value being `subscribe` or `unsubscribe`.
 
-`subscribe`, `unsubscribe` and `new-public-room` have a `room` field with the value being the room to join/leave/that was created.
+It also requires a `room` field with the value being the room to join or leave.
 
 Example:
 
@@ -37,17 +37,15 @@ Example:
 {
   "type": "command",
   "cmd": "subscribe",
-  "room": "pvp"
+  "room": "dfcdde5f-e781-49b0-bbfa-e5ee1568c83a"
 }
 ```
 
-would join the `pvp` room.
-
-`hello` is sent when the client connects and has an array field `public-rooms` with a list of public rooms available.
+would join the `dfcdde5f-e781-49b0-bbfa-e5ee1568c83a` room.
 
 ## Message
 
-Messages are the core of the server and require at _least_ two more fields: `id` and `room`. `room` is the room where the message will be sent to and `id` should be a unique identifier for the message (like a UUID).
+Messages are the core of the server and require at one more field: `room`. `room` is the room where the message will be sent to.
 
 Anything else is optional and is up to the client, for example `body` or `content`-like keys.
 

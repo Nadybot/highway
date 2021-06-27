@@ -1,84 +1,20 @@
-use dashmap::DashSet;
 use leaky_bucket_lite::LeakyBucket;
-use once_cell::sync::Lazy;
 use tokio::time::Duration;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use std::{env::var, sync::Arc};
+use std::env::var;
 
 pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to interact with a room that you are not subscribed to\"}";
+pub const ROOM_NAME_TOO_SHORT: &str =
+    "{\"type\": \"error\", \"message\": \"The room name provided is shorter than 32 characters\"}";
 pub const INVALID_JSON_MSG: &str =
     "{\"type\": \"error\", \"message\": \"You sent an invalid JSON payload\"}";
-pub const INVALID_CMD_MSG: &str =
-    "{\"type\": \"error\", \"message\": \"You sent a command that clients may not send\"}";
 pub const ROOM_JOIN_MSG: &str = "{\"type\": \"success\", \"message\": \"You joined the room\"}";
 pub const ROOM_LEAVE_MSG: &str = "{\"type\": \"success\", \"message\": \"You left the room\"}";
-const MIN_PRIV_ROOM_LEN: usize = 32;
-
-pub static PUBLIC_CHANNELS: Lazy<Arc<DashSet<String>>> = Lazy::new(|| {
-    let set = DashSet::with_capacity(10);
-    set.insert(String::from("pvp"));
-    set.insert(String::from("ooc"));
-    set.insert(String::from("pvm"));
-    set.insert(String::from("wtb"));
-    set.insert(String::from("wts"));
-    set.insert(String::from("clan"));
-    set.insert(String::from("omni"));
-    set.insert(String::from("neutral"));
-    set.insert(String::from("rp"));
-    set.insert(String::from("chat"));
-    Arc::new(set)
-});
-
-pub static CONFIG: Lazy<WebSocketConfig> = Lazy::new(|| WebSocketConfig {
-    accept_unmasked_frames: false,
-    max_send_queue: None,
-    max_message_size: Some(
-        var("MAX_MESSAGE_SIZE")
-            .unwrap_or_else(|_| String::from("1048576"))
-            .parse()
-            .unwrap(),
-    ),
-    max_frame_size: Some(
-        var("MAX_FRAME_SIZE")
-            .unwrap_or_else(|_| String::from("1048576"))
-            .parse()
-            .unwrap(),
-    ),
-});
-
-#[inline(always)]
-pub fn public_channels() -> Vec<String> {
-    PUBLIC_CHANNELS.iter().map(|i| i.key().clone()).collect()
-}
-
-#[inline(always)]
-pub fn get_hello_payload() -> String {
-    format!(
-        "{{\"type\": \"command\", \"cmd\": \"hello\", \"public-rooms\": {:?}}}",
-        public_channels()
-    )
-}
+const MIN_ROOM_LEN: usize = 32;
 
 #[inline(always)]
 pub fn is_valid_room(room: &str) -> bool {
-    PUBLIC_CHANNELS.iter().any(|i| *i == room) || room.len() >= MIN_PRIV_ROOM_LEN
-}
-
-#[inline(always)]
-pub fn get_join_payload(room: &str) -> String {
-    format!(
-        "{{\"type\": \"command\", \"cmd\": \"subscribe\", \"room\": {:?}}}",
-        room
-    )
-}
-
-#[inline(always)]
-pub fn new_room_payload(room: &str) -> String {
-    format!(
-        "{{\"type\": \"command\", \"cmd\": \"new-public-room\", \"room\": {:?}}}",
-        room
-    )
+    room.len() >= MIN_ROOM_LEN
 }
 
 pub fn get_freq_ratelimiter() -> LeakyBucket {

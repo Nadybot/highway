@@ -1,8 +1,8 @@
 use crate::json::from_slice;
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
+use log::{debug, info};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
@@ -13,8 +13,8 @@ use tokio::{
     },
 };
 use tokio_tungstenite::{
-    accept_async_with_config, connect_async,
-    tungstenite::{Error, Message},
+    accept_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Error, Message},
     WebSocketStream,
 };
 
@@ -22,59 +22,54 @@ use std::{
     env::{set_var, var},
     io::Error as IoError,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 mod constants;
 mod json;
 mod model;
 
-type Broadcast = Sender<model::InternalMessage>;
+type State = DashMap<String, (Sender<Message>, AtomicUsize)>;
 
-async fn relay_from(source: &str, broadcast: Broadcast) -> Result<(), Error> {
-    let (stream, _) = connect_async(source).await?;
-    worker(stream, broadcast, true).await;
-    Ok(())
-}
-
-async fn worker<S: 'static>(conn: WebSocketStream<S>, broadcast: Broadcast, relaying: bool)
+async fn worker<S: 'static>(conn: WebSocketStream<S>, connections: Arc<State>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let freq_ratelimiter = constants::get_freq_ratelimiter();
     let size_ratelimiter = constants::get_size_ratelimiter();
-    let mut receiver = broadcast.subscribe();
     let rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
 
     let (mut write, mut read) = conn.split();
-    let (tx, mut rx) = unbounded_channel();
+    let (write_handle, mut read_handle) = unbounded_channel();
 
-    // Set of IDs that a relaying client is awaiting replies for
-    let awaiting_reply = Arc::new(DashSet::new());
-
-    let listen_rooms = rooms.clone();
     spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = read_handle.recv().await {
             debug!("Sending websocket message: {:?}", msg);
             let _ = write.send(msg).await;
         }
     });
 
-    let send_tx = tx.clone();
-    let replies = awaiting_reply.clone();
-    spawn(async move {
-        while let Ok(msg) = receiver.recv().await {
-            if let model::Payload::Message(m) = msg.payload {
-                if (relaying && msg.was_relayed) || (!relaying && !listen_rooms.contains(&m.room)) {
-                    continue;
-                }
-                if relaying {
-                    replies.insert(m.id);
-                }
+    for room in rooms.iter() {
+        let mut rx = if let Some(conn) = connections.get(room.key()) {
+            let (tx, counter) = conn.value().clone();
+            counter.fetch_add(1, Ordering::Relaxed);
+            tx.subscribe()
+        } else {
+            let (tx, rx) = channel(100);
+            connections.insert(room.clone(), (tx.clone(), AtomicUsize::new(1)));
+            rx
+        };
+
+        let wh = write_handle.clone();
+        spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                let _ = wh.send(msg);
             }
-            let _ = send_tx.send(msg.tungstenite_message);
-        }
-    });
+        });
+    }
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
@@ -83,95 +78,91 @@ where
             match from_slice::<model::Payload>(&mut m.clone().into_data()) {
                 Ok(payload) => match &payload {
                     model::Payload::Message(msg) => {
-                        if !relaying {
-                            let _ = freq_ratelimiter.acquire_one().await;
-                            let _ = size_ratelimiter.acquire(amt).await;
-                        } else {
-                            let existed = awaiting_reply.remove(&msg.id).is_some();
-                            if existed {
-                                continue;
-                            }
-                        }
+                        let _ = freq_ratelimiter.acquire_one().await;
+                        let _ = size_ratelimiter.acquire(amt).await;
 
-                        if rooms.contains(&msg.room) || relaying {
-                            let msg = model::InternalMessage {
-                                payload,
-                                was_relayed: relaying,
-                                tungstenite_message: m,
-                            };
-                            let _ = broadcast.send(msg);
+                        if rooms.contains(&msg.room) {
+                            let _ = connections.get(&msg.room).unwrap().value().0.send(m);
                         } else {
-                            let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                            let _ = write_handle
+                                .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
                         }
                     }
                     model::Payload::Command(cmd) => match cmd {
                         model::Command::Join(j) => {
                             if constants::is_valid_room(&j.room) {
                                 rooms.insert(j.room.clone());
-                                let _ =
-                                    tx.send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
+                                let _ = write_handle
+                                    .send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
                             } else {
-                                let _ =
-                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                                let _ = write_handle.send(Message::Text(
+                                    constants::ROOM_NAME_TOO_SHORT.to_string(),
+                                ));
                             }
                         }
                         model::Command::Leave(l) => {
                             let was_in_room = rooms.remove(&l.room).is_some();
                             if was_in_room {
-                                let _ =
-                                    tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
+                                let _ = write_handle
+                                    .send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
                             } else {
-                                let _ =
-                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                                let _ = write_handle
+                                    .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
                             }
-                        }
-                        model::Command::Hello(h) if relaying => {
-                            for room in &h.public_rooms {
-                                let msg = Message::Text(constants::get_join_payload(room));
-                                let _ = tx.send(msg);
-                            }
-                        }
-                        model::Command::NewPublicRoom(p) if relaying => {
-                            constants::PUBLIC_CHANNELS.insert(p.room.clone());
-                            let msg = Message::Text(constants::get_join_payload(&p.room));
-                            let _ = tx.send(msg);
-                            let msg = model::InternalMessage {
-                                payload,
-                                was_relayed: true,
-                                tungstenite_message: m,
-                            };
-                            let _ = broadcast.send(msg);
-                        }
-                        _ => {
-                            let _ = tx.send(Message::Text(constants::INVALID_CMD_MSG.to_string()));
                         }
                     },
-                    // Ignore success and error messages
-                    _ => {}
                 },
                 Err(e) => {
                     debug!("Error in JSON: {:?}", e);
-                    let _ = tx.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
+                    let _ =
+                        write_handle.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
                 }
             }
         }
     }
 
-    info!("Connection to {:?} closed", rooms);
+    debug!("Cleaning up websocket");
+    for room in rooms.iter() {
+        let conns = connections
+            .get(room.key())
+            .expect("Should never be None at this stage");
+        debug!("Leaving room");
+        let new = conns.1.fetch_sub(1, Ordering::Relaxed);
+        if new == 1 {
+            debug!("Deleting room");
+            connections.remove(room.key());
+        }
+    }
 }
 
 async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
-    broadcast: Broadcast,
+    connections: Arc<State>,
 ) -> Result<(), Error> {
     info!("Incoming connection from {:?}", addr);
-    let mut ws_stream = accept_async_with_config(raw_stream, Some(*constants::CONFIG)).await?;
-    ws_stream
-        .send(Message::Text(constants::get_hello_payload()))
-        .await?;
+    let ws_stream = accept_async_with_config(
+        raw_stream,
+        Some(WebSocketConfig {
+            accept_unmasked_frames: false,
+            max_send_queue: None,
+            max_message_size: Some(
+                var("MAX_MESSAGE_SIZE")
+                    .unwrap_or_else(|_| String::from("1048576"))
+                    .parse()
+                    .unwrap(),
+            ),
+            max_frame_size: Some(
+                var("MAX_FRAME_SIZE")
+                    .unwrap_or_else(|_| String::from("1048576"))
+                    .parse()
+                    .unwrap(),
+            ),
+        }),
+    )
+    .await?;
 
-    worker(ws_stream, broadcast, false).await;
+    worker(ws_stream, connections).await;
 
     Ok(())
 }
@@ -190,23 +181,14 @@ async fn main() -> Result<(), IoError> {
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    let (broadcast, _) = channel(1000);
-
-    if let Ok(s) = var("RELAY_SOURCE") {
-        let b = broadcast.clone();
-        spawn(async move {
-            if let Err(e) = relay_from(&s, b).await {
-                error!("Relay failed: {}", e);
-            };
-        });
-    }
+    let connections: Arc<State> = Arc::new(DashMap::new());
 
     let try_socket = TcpListener::bind(&addr).await;
     let listener = try_socket.expect("Failed to bind");
     info!("Listening on: {}", addr);
 
     while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, addr, broadcast.clone()));
+        tokio::spawn(handle_connection(stream, addr, connections.clone()));
     }
 
     Ok(())
