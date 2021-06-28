@@ -7,10 +7,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     spawn,
-    sync::{
-        broadcast::{channel, Sender},
-        mpsc::unbounded_channel,
-    },
+    sync::mpsc::{unbounded_channel, UnboundedSender},
 };
 use tokio_tungstenite::{
     accept_async_with_config,
@@ -22,17 +19,14 @@ use std::{
     env::{set_var, var},
     io::Error as IoError,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 mod constants;
 mod json;
 mod model;
 
-type State = DashMap<String, (Sender<Message>, AtomicUsize)>;
+type State = DashMap<String, DashMap<String, UnboundedSender<Message>>>;
 
 async fn worker<S: 'static>(conn: WebSocketStream<S>, connections: Arc<State>)
 where
@@ -41,35 +35,17 @@ where
     let freq_ratelimiter = constants::get_freq_ratelimiter();
     let size_ratelimiter = constants::get_size_ratelimiter();
     let rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    let id = uuid::Uuid::new_v4().to_string();
 
     let (mut write, mut read) = conn.split();
-    let (write_handle, mut read_handle) = unbounded_channel();
+    let (tx, mut rx) = unbounded_channel();
 
     spawn(async move {
-        while let Some(msg) = read_handle.recv().await {
+        while let Some(msg) = rx.recv().await {
             debug!("Sending websocket message: {:?}", msg);
             let _ = write.send(msg).await;
         }
     });
-
-    for room in rooms.iter() {
-        let mut rx = if let Some(conn) = connections.get(room.key()) {
-            let (tx, counter) = conn.value().clone();
-            counter.fetch_add(1, Ordering::Relaxed);
-            tx.subscribe()
-        } else {
-            let (tx, rx) = channel(100);
-            connections.insert(room.clone(), (tx.clone(), AtomicUsize::new(1)));
-            rx
-        };
-
-        let wh = write_handle.clone();
-        spawn(async move {
-            while let Ok(msg) = rx.recv().await {
-                let _ = wh.send(msg);
-            }
-        });
-    }
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
@@ -82,20 +58,32 @@ where
                         let _ = size_ratelimiter.acquire(amt).await;
 
                         if rooms.contains(&msg.room) {
-                            let _ = connections.get(&msg.room).unwrap().value().0.send(m);
+                            for recp in connections.get(&msg.room).unwrap().value() {
+                                if recp.key() != &id {
+                                    let _ = recp.value().send(m.clone());
+                                }
+                            }
                         } else {
-                            let _ = write_handle
-                                .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                            let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
                         }
                     }
                     model::Payload::Command(cmd) => match cmd {
                         model::Command::Join(j) => {
                             if constants::is_valid_room(&j.room) {
                                 rooms.insert(j.room.clone());
-                                let _ = write_handle
-                                    .send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
+
+                                if let Some(conns) = connections.get(&j.room) {
+                                    conns.value().insert(id.clone(), tx.clone());
+                                } else {
+                                    let map = DashMap::new();
+                                    map.insert(id.clone(), tx.clone());
+                                    connections.insert(j.room.clone(), map);
+                                }
+
+                                let _ =
+                                    tx.send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
                             } else {
-                                let _ = write_handle.send(Message::Text(
+                                let _ = tx.send(Message::Text(
                                     constants::ROOM_NAME_TOO_SHORT.to_string(),
                                 ));
                             }
@@ -103,19 +91,31 @@ where
                         model::Command::Leave(l) => {
                             let was_in_room = rooms.remove(&l.room).is_some();
                             if was_in_room {
-                                let _ = write_handle
-                                    .send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
+                                let conns = connections.get(&l.room);
+                                if let Some(c) = conns {
+                                    if c.len() == 1 {
+                                        drop(c);
+                                        debug!("Deleting room");
+                                        connections.remove(&l.room);
+                                    } else {
+                                        debug!("Leaving room");
+                                        c.value().remove(&id);
+                                    }
+
+                                    debug!("Rooms: {:?}", connections);
+                                }
+                                let _ =
+                                    tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
                             } else {
-                                let _ = write_handle
-                                    .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                                let _ =
+                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
                             }
                         }
                     },
                 },
                 Err(e) => {
                     debug!("Error in JSON: {:?}", e);
-                    let _ =
-                        write_handle.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
+                    let _ = tx.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
                 }
             }
         }
@@ -123,14 +123,18 @@ where
 
     debug!("Cleaning up websocket");
     for room in rooms.iter() {
-        let conns = connections
-            .get(room.key())
-            .expect("Should never be None at this stage");
-        debug!("Leaving room");
-        let new = conns.1.fetch_sub(1, Ordering::Relaxed);
-        if new == 1 {
-            debug!("Deleting room");
-            connections.remove(room.key());
+        let conns = connections.get(room.key());
+        if let Some(c) = conns {
+            if c.len() == 1 {
+                drop(c);
+                debug!("Deleting room");
+                connections.remove(room.key());
+            } else {
+                debug!("Leaving room");
+                c.value().remove(&id);
+            }
+
+            debug!("Rooms: {:?}", connections);
         }
     }
 }
