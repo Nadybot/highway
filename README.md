@@ -9,16 +9,38 @@ cargo build --release
 ./target/release/highway
 ```
 
-highway runs with sensible defaults, to override them, use enviroment variables:
+highway runs with sensible defaults, to override them, create a file called `config.json` with these contents:
 
-- `PORT` sets the port to listen on (defaults to 3333)
-- `MAX_MESSAGE_SIZE` and `MAX_FRAME_SIZE` are byte values and set limits for the websocket payloads (defaults to 1MB)
-- `MSG_PER_SEC` sets how many messages a client may send per second (defaults to 10)
-- `BYTES_PER_10_SEC` sets how many bytes a client may send per 10 seconds (defaults to 5MB)
+```json
+{
+  "port": 3333,
+  "msg_per_sec": 10,
+  "bytes_per_10_sec": 5242880,
+  "max_message_size": 1048576,
+  "max_frame_size": 1048576,
+  "admin_password_hash": "$argon2id$v=19$m=4096,t=3,p=1$aGlnaHdheWlzc3VwcmVtZQ$KppnM084YRY1MkzMPteCzn+QF30mwFl9qIuwHUOsGfE",
+  "public_channels": [
+    {
+      "name": "boss_timers",
+      "read_only": true
+    },
+    {
+      "name": "update_notifications"
+    }
+  ]
+}
+```
+
+- `port` sets the port to listen on (defaults to 3333)
+- `max_message_size` and `max_frame_size` are byte values and set limits for the websocket payloads (defaults to 1MB)
+- `msg_per_sec` sets how many messages a client may send per second (defaults to 10)
+- `bytes_per_10_sec` sets how many bytes a client may send per 10 seconds (defaults to 5MB)
+- `admin_password_hash` is an argon2id hash used for gaining admin access with the `Authorization` header. This can be generated with `echo -n "password" | argon2 myhash -id`
+- `public_channels` is an array of special-named channels that can optionally be read only, i.e. only admins can send messages
 
 ## Connecting
 
-Clients can connect at `ws://highway`.
+Clients can connect at `ws://highway`. Optionally, the password from the specific argon2id hash can be provided to gain admin access via the `Authorization` HTTP header.
 
 ## Message format
 

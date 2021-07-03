@@ -1,0 +1,17 @@
+{
+    "port": 3333,
+    "msg_per_sec": 10,
+    "bytes_per_10_sec": 5242880,
+    "max_message_size": 1048576,
+    "max_frame_size": 1048576,
+    "admin_password_hash": "$argon2id$v=19$m=4096,t=3,p=1$aGlnaHdheWlzc3VwcmVtZQ$KppnM084YRY1MkzMPteCzn+QF30mwFl9qIuwHUOsGfE",
+    "public_channels": [
+        {
+            "name": "boss_timers",
+            "read_only": true
+        },
+        {
+            "name": "update_notifications"
+        }
+    ]
+}

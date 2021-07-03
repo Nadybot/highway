@@ -1,11 +1,12 @@
+use crate::config::CONFIG;
+
 use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
-
-use std::env::var;
 
 pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to interact with a room that you are not subscribed to\"}";
 pub const ROOM_NAME_TOO_SHORT: &str =
     "{\"type\": \"error\", \"message\": \"The room name provided is shorter than 32 characters\"}";
+pub const ROOM_READ_ONLY: &str = "{\"type\": \"error\", \"message\": \"The room you attempted to send a message in is in read-only mode\"}";
 pub const INVALID_JSON_MSG: &str =
     "{\"type\": \"error\", \"message\": \"You sent an invalid JSON payload\"}";
 pub const ROOM_JOIN_MSG: &str = "{\"type\": \"success\", \"message\": \"You joined the room\"}";
@@ -17,28 +18,22 @@ pub fn is_valid_room(room: &str) -> bool {
     room.len() >= MIN_ROOM_LEN
 }
 
+#[inline(always)]
 pub fn get_freq_ratelimiter() -> LeakyBucket {
-    let msg_per_sec = var("MSG_PER_SEC")
-        .unwrap_or_else(|_| String::from("10"))
-        .parse()
-        .unwrap();
     LeakyBucket::builder()
-        .max(msg_per_sec)
-        .tokens(msg_per_sec)
+        .max(CONFIG.msg_per_sec)
+        .tokens(CONFIG.msg_per_sec)
         .refill_interval(Duration::from_secs(1))
-        .refill_amount(msg_per_sec)
+        .refill_amount(CONFIG.msg_per_sec)
         .build()
 }
 
+#[inline(always)]
 pub fn get_size_ratelimiter() -> LeakyBucket {
-    let bytes_per_10_seconds = var("BYTES_PER_10_SEC")
-        .unwrap_or_else(|_| String::from("5242880"))
-        .parse()
-        .unwrap();
     LeakyBucket::builder()
-        .max(bytes_per_10_seconds)
-        .tokens(bytes_per_10_seconds)
+        .max(CONFIG.bytes_per_10_sec)
+        .tokens(CONFIG.bytes_per_10_sec)
         .refill_interval(Duration::from_secs(10))
-        .refill_amount(bytes_per_10_seconds)
+        .refill_amount(CONFIG.bytes_per_10_sec)
         .build()
 }
