@@ -13,12 +13,10 @@ pub const ROOM_JOIN_MSG: &str = "{\"type\": \"success\", \"message\": \"You join
 pub const ROOM_LEAVE_MSG: &str = "{\"type\": \"success\", \"message\": \"You left the room\"}";
 const MIN_ROOM_LEN: usize = 32;
 
-#[inline(always)]
-pub fn is_valid_room(room: &str) -> bool {
+pub const fn is_valid_room(room: &str) -> bool {
     room.len() >= MIN_ROOM_LEN
 }
 
-#[inline(always)]
 pub fn get_freq_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
         .max(CONFIG.msg_per_sec)
@@ -28,7 +26,6 @@ pub fn get_freq_ratelimiter() -> LeakyBucket {
         .build()
 }
 
-#[inline(always)]
 pub fn get_size_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
         .max(CONFIG.bytes_per_10_sec)

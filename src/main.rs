@@ -1,3 +1,4 @@
+#![feature(once_cell)]
 use crate::{config::CONFIG, json::from_slice};
 
 use argon2::{
@@ -59,6 +60,11 @@ where
 
     while let Some(msg) = read.next().await {
         if let Ok(m) = msg {
+            if m.is_ping() {
+                let _ = tx.send(Message::Pong(m.into_data()));
+                continue;
+            }
+
             let amt = m.len();
             debug!("{:?}", m);
             match from_slice::<model::Payload>(&mut m.clone().into_data()) {

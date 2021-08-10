@@ -1,9 +1,8 @@
+use crate::json::Error;
 use log::error;
-use once_cell::sync::Lazy;
 use serde::Deserialize;
-use serde_json::Error;
 
-use std::{fs::read_to_string, path::Path, process::exit};
+use std::{fs::read_to_string, lazy::SyncLazy, path::Path, process::exit};
 
 #[derive(Deserialize, Debug)]
 pub struct PublicChannel {
@@ -30,41 +29,37 @@ pub struct Config {
     pub public_channels: Vec<PublicChannel>,
 }
 
-#[inline(always)]
-fn default_port() -> u16 {
+const fn default_port() -> u16 {
     3333
 }
 
-#[inline(always)]
-fn default_msg_per_sec() -> usize {
+const fn default_msg_per_sec() -> usize {
     10
 }
 
-#[inline(always)]
-fn default_bytes_per_10_sec() -> usize {
-    5242880
+const fn default_bytes_per_10_sec() -> usize {
+    5_242_880
 }
 
-#[inline(always)]
-fn default_max_message_size() -> usize {
-    1048576
+const fn default_max_message_size() -> usize {
+    1_048_576
 }
 
-#[inline(always)]
-fn default_max_frame_size() -> usize {
-    1048576
+const fn default_max_frame_size() -> usize {
+    1_048_576
 }
 
 pub fn try_load() -> Result<Config, Error> {
     if Path::new("config.json").exists() {
-        let content = read_to_string("config.json").unwrap();
-        crate::json::from_str(&content)
+        let mut content = read_to_string("config.json").unwrap();
+        crate::json::from_str(&mut content)
     } else {
-        crate::json::from_str("{}")
+        let mut content = String::from("{}");
+        crate::json::from_str(&mut content)
     }
 }
 
-pub static CONFIG: Lazy<Config> = Lazy::new(|| {
+pub static CONFIG: SyncLazy<Config> = SyncLazy::new(|| {
     try_load().unwrap_or_else(|e| {
         error!("Configuration Error: {}", e);
         exit(1)
