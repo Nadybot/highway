@@ -15,6 +15,8 @@ pub struct PublicChannel {
 pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_connections_per_ip")]
+    pub connections_per_ip: usize,
     #[serde(default = "default_msg_per_sec")]
     pub msg_per_sec: usize,
     #[serde(default = "default_bytes_per_10_sec")]
@@ -31,6 +33,10 @@ pub struct Config {
 
 const fn default_port() -> u16 {
     3333
+}
+
+const fn default_connections_per_ip() -> usize {
+    50
 }
 
 const fn default_msg_per_sec() -> usize {

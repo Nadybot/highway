@@ -39,13 +39,13 @@ mod model;
 // Name: (read_only, send_handles)
 type State = DashMap<String, (bool, DashMap<String, UnboundedSender<Message>>)>;
 
-async fn worker<S: 'static>(conn: WebSocketStream<S>, connections: Arc<State>, is_admin: bool)
+async fn worker<S: 'static>(conn: WebSocketStream<S>, rooms: Arc<State>, is_admin: bool)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let freq_ratelimiter = constants::get_freq_ratelimiter();
     let size_ratelimiter = constants::get_size_ratelimiter();
-    let rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    let client_rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
     let id = uuid::Uuid::new_v4().to_string();
 
     let (mut write, mut read) = conn.split();
@@ -75,8 +75,8 @@ where
                             let _ = size_ratelimiter.acquire(amt).await;
                         }
 
-                        if rooms.contains(&msg.room) {
-                            let room = connections.get(&msg.room).unwrap();
+                        if client_rooms.contains(&msg.room) {
+                            let room = rooms.get(&msg.room).unwrap();
 
                             if room.0 && !is_admin {
                                 let _ =
@@ -98,14 +98,14 @@ where
                             if constants::is_valid_room(&j.room)
                                 || CONFIG.public_channels.iter().any(|c| c.name == j.room)
                             {
-                                rooms.insert(j.room.clone());
+                                client_rooms.insert(j.room.clone());
 
-                                if let Some(conns) = connections.get(&j.room) {
+                                if let Some(conns) = rooms.get(&j.room) {
                                     conns.value().1.insert(id.clone(), tx.clone());
                                 } else {
                                     let map = DashMap::new();
                                     map.insert(id.clone(), tx.clone());
-                                    connections.insert(j.room.clone(), (false, map));
+                                    rooms.insert(j.room.clone(), (false, map));
                                 }
 
                                 let _ =
@@ -117,20 +117,20 @@ where
                             }
                         }
                         model::Command::Leave(l) => {
-                            let was_in_room = rooms.remove(&l.room).is_some();
+                            let was_in_room = client_rooms.remove(&l.room).is_some();
                             if was_in_room {
-                                let conns = connections.get(&l.room);
+                                let conns = rooms.get(&l.room);
                                 if let Some(c) = conns {
                                     if c.1.len() == 1 {
                                         drop(c);
                                         debug!("Deleting room");
-                                        connections.remove(&l.room);
+                                        rooms.remove(&l.room);
                                     } else {
                                         debug!("Leaving room");
                                         c.1.remove(&id);
                                     }
 
-                                    debug!("Rooms: {:?}", connections);
+                                    debug!("Rooms: {:?}", rooms);
                                 }
                                 let _ =
                                     tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
@@ -150,19 +150,19 @@ where
     }
 
     debug!("Cleaning up websocket");
-    for room in rooms.iter() {
-        let conns = connections.get(room.key());
+    for room in client_rooms.iter() {
+        let conns = rooms.get(room.key());
         if let Some(c) = conns {
             if c.1.len() == 1 {
                 drop(c);
                 debug!("Deleting room");
-                connections.remove(room.key());
+                rooms.remove(room.key());
             } else {
                 debug!("Leaving room");
                 c.1.remove(&id);
             }
 
-            debug!("Rooms: {:?}", connections);
+            debug!("Rooms: {:?}", rooms);
         }
     }
 }
@@ -170,7 +170,7 @@ where
 async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
-    connections: Arc<State>,
+    rooms: Arc<State>,
 ) -> Result<(), Error> {
     info!("Incoming connection from {:?}", addr);
     let mut is_admin = false;
@@ -201,7 +201,7 @@ async fn handle_connection(
     )
     .await?;
 
-    worker(ws_stream, connections, is_admin).await;
+    worker(ws_stream, rooms, is_admin).await;
 
     Ok(())
 }
@@ -215,11 +215,11 @@ async fn main() -> Result<(), IoError> {
 
     let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
 
-    let connections: Arc<State> = Arc::new(DashMap::new());
+    let rooms: Arc<State> = Arc::new(DashMap::new());
 
     for room in &CONFIG.public_channels {
         let map = DashMap::new();
-        connections.insert(room.name.clone(), (room.read_only, map));
+        rooms.insert(room.name.clone(), (room.read_only, map));
     }
 
     let try_socket = TcpListener::bind(&addr).await;
@@ -227,7 +227,7 @@ async fn main() -> Result<(), IoError> {
     info!("Listening on: {}", addr);
 
     while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, addr, connections.clone()));
+        tokio::spawn(handle_connection(stream, addr, rooms.clone()));
     }
 
     Ok(())

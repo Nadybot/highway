@@ -14,6 +14,7 @@ highway runs with sensible defaults, to override them, create a file called `con
 ```json
 {
   "port": 3333,
+  "connections_per_ip": 50,
   "msg_per_sec": 10,
   "bytes_per_10_sec": 5242880,
   "max_message_size": 1048576,
@@ -32,6 +33,7 @@ highway runs with sensible defaults, to override them, create a file called `con
 ```
 
 - `port` sets the port to listen on (defaults to 3333)
+- `connections_per_ip` set the maximum amount of connections one IP may open to the server (defaults to 50)
 - `max_message_size` and `max_frame_size` are byte values and set limits for the websocket payloads (defaults to 1MB)
 - `msg_per_sec` sets how many messages a client may send per second (defaults to 10)
 - `bytes_per_10_sec` sets how many bytes a client may send per 10 seconds (defaults to 5MB)
