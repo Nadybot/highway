@@ -1,5 +1,6 @@
 {
     "port": 3333,
+    "connections_per_ip": 2,
     "msg_per_sec": 10,
     "bytes_per_10_sec": 5242880,
     "max_message_size": 1048576,

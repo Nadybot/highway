@@ -7,6 +7,7 @@ use argon2::{
 };
 use dashmap::{DashMap, DashSet};
 use futures_util::{SinkExt, StreamExt};
+use leaky_bucket_lite::LeakyBucket;
 use log::{debug, info};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -27,7 +28,7 @@ use tokio_tungstenite::{
 use std::{
     env::{set_var, var},
     io::Error as IoError,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
@@ -38,13 +39,22 @@ mod model;
 
 // Name: (read_only, send_handles)
 type State = DashMap<String, (bool, DashMap<String, UnboundedSender<Message>>)>;
+// IP: (conn_count, (freq, size))
+type ConnectionState = DashMap<IpAddr, (usize, (LeakyBucket, LeakyBucket))>;
 
-async fn worker<S: 'static>(conn: WebSocketStream<S>, rooms: Arc<State>, is_admin: bool)
-where
+async fn worker<S: 'static>(
+    conn: WebSocketStream<S>,
+    ip: IpAddr,
+    rooms: Arc<State>,
+    connections: Arc<ConnectionState>,
+    is_admin: bool,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let freq_ratelimiter = constants::get_freq_ratelimiter();
-    let size_ratelimiter = constants::get_size_ratelimiter();
+    let (freq_ratelimiter, size_ratelimiter) = {
+        let (f, s) = &connections.get(&ip).unwrap().1;
+        (f.clone(), s.clone())
+    };
     let client_rooms: Arc<DashSet<String>> = Arc::new(DashSet::new());
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -165,14 +175,25 @@ where
             debug!("Rooms: {:?}", rooms);
         }
     }
+
+    let mut entry = connections.get_mut(&ip).unwrap();
+    entry.0 -= 1;
+    if entry.0 == 0 {
+        drop(entry);
+        debug!("Client {} disconnected last connection, removing data", ip);
+        connections.remove(&ip);
+    }
 }
 
 async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
     rooms: Arc<State>,
+    connections: Arc<ConnectionState>,
 ) -> Result<(), Error> {
-    info!("Incoming connection from {:?}", addr);
+    let ip = addr.ip();
+
+    info!("Incoming connection from {:?}", ip);
     let mut is_admin = false;
     let auth_callback = |req: &Request, res: Response| {
         let auth = req.headers().get("Authorization");
@@ -189,6 +210,25 @@ async fn handle_connection(
         Ok(res)
     };
 
+    if let Some(mut entry) = connections.get_mut(&ip) {
+        if entry.0 + 1 > CONFIG.connections_per_ip {
+            return Ok(());
+        }
+
+        entry.0 += 1;
+    } else {
+        connections.insert(
+            ip,
+            (
+                1,
+                (
+                    constants::get_freq_ratelimiter(),
+                    constants::get_size_ratelimiter(),
+                ),
+            ),
+        );
+    };
+
     let ws_stream = accept_hdr_async_with_config(
         raw_stream,
         auth_callback,
@@ -201,7 +241,7 @@ async fn handle_connection(
     )
     .await?;
 
-    worker(ws_stream, rooms, is_admin).await;
+    worker(ws_stream, ip, rooms, connections, is_admin).await;
 
     Ok(())
 }
@@ -215,6 +255,7 @@ async fn main() -> Result<(), IoError> {
 
     let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
 
+    let connections: Arc<ConnectionState> = Arc::new(DashMap::new());
     let rooms: Arc<State> = Arc::new(DashMap::new());
 
     for room in &CONFIG.public_channels {
@@ -227,7 +268,12 @@ async fn main() -> Result<(), IoError> {
     info!("Listening on: {}", addr);
 
     while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, addr, rooms.clone()));
+        tokio::spawn(handle_connection(
+            stream,
+            addr,
+            rooms.clone(),
+            connections.clone(),
+        ));
     }
 
     Ok(())
