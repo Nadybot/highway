@@ -73,6 +73,8 @@ async fn worker<S: 'static>(
             if m.is_ping() {
                 let _ = tx.send(Message::Pong(m.into_data()));
                 continue;
+            } else if m.is_close() {
+                break;
             }
 
             let amt = m.len();
