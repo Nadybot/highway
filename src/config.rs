@@ -56,8 +56,13 @@ const fn default_max_frame_size() -> usize {
 }
 
 pub fn try_load() -> Result<Config, Error> {
-    if Path::new("config.json").exists() {
-        let mut content = read_to_string("config.json").unwrap();
+    let file = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| String::from("config.json"));
+    let path = Path::new(&file);
+
+    if path.exists() {
+        let mut content = read_to_string(path).unwrap();
         crate::json::from_str(&mut content)
     } else {
         let mut content = String::from("{}");

@@ -133,7 +133,9 @@ async fn worker<S: 'static>(
                             if was_in_room {
                                 let conns = rooms.get(&l.room);
                                 if let Some(c) = conns {
-                                    if c.1.len() == 1 {
+                                    if c.1.len() == 1
+                                        && !CONFIG.public_channels.iter().any(|c| c.name == l.room)
+                                    {
                                         drop(c);
                                         debug!("Deleting room");
                                         rooms.remove(&l.room);
@@ -165,7 +167,7 @@ async fn worker<S: 'static>(
     for room in client_rooms.iter() {
         let conns = rooms.get(room.key());
         if let Some(c) = conns {
-            if c.1.len() == 1 {
+            if c.1.len() == 1 && !CONFIG.public_channels.iter().any(|c| &c.name == room.key()) {
                 drop(c);
                 debug!("Deleting room");
                 rooms.remove(room.key());
