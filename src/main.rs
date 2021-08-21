@@ -84,7 +84,7 @@ async fn worker<S: 'static>(
                     model::Payload::Message(msg) => {
                         if !is_admin {
                             let _ = freq_ratelimiter.acquire_one().await;
-                            let _ = size_ratelimiter.acquire(amt).await;
+                            let _ = size_ratelimiter.acquire(amt as f64).await;
                         }
 
                         if client_rooms.contains(&msg.room) {

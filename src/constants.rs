@@ -19,18 +19,18 @@ pub const fn is_valid_room(room: &str) -> bool {
 
 pub fn get_freq_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
-        .max(CONFIG.msg_per_sec)
-        .tokens(CONFIG.msg_per_sec)
+        .max(CONFIG.msg_per_sec as f64)
+        .tokens(CONFIG.msg_per_sec as f64)
         .refill_interval(Duration::from_secs(1))
-        .refill_amount(CONFIG.msg_per_sec)
+        .refill_amount(CONFIG.msg_per_sec as f64)
         .build()
 }
 
 pub fn get_size_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
-        .max(CONFIG.bytes_per_10_sec)
-        .tokens(CONFIG.bytes_per_10_sec)
+        .max(CONFIG.bytes_per_10_sec as f64)
+        .tokens(CONFIG.bytes_per_10_sec as f64)
         .refill_interval(Duration::from_secs(10))
-        .refill_amount(CONFIG.bytes_per_10_sec)
+        .refill_amount(CONFIG.bytes_per_10_sec as f64)
         .build()
 }
