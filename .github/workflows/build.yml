@@ -45,7 +45,7 @@ jobs:
       - name: Build for aarch64
         run: |
           cargo build --release --target=aarch64-unknown-linux-gnu --features simd
-          strip target/aarch64-unknown-linux-gnu/release/highway
+          aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/highway
           cp target/aarch64-unknown-linux-gnu/release/highway highway-linux-aarch64
 
       - name: Set up Rust for armv7
@@ -59,7 +59,7 @@ jobs:
       - name: Build for armv7
         run: |
           cargo build --release --target=armv7-unknown-linux-gnueabihf
-          strip target/armv7-unknown-linux-gnueabihf/release/highway
+          arm-linux-gnueabihf-strip target/armv7-unknown-linux-gnueabihf/release/highway
           cp target/armv7-unknown-linux-gnueabihf/release/highway highway-linux-armv7
 
       - name: Upload artifacts
