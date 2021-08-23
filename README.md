@@ -46,36 +46,85 @@ Clients can connect at `ws://highway`. Optionally, the password from the specifi
 
 ## Message format
 
-Each payload needs to be valid JSON and contain a `type` key that is either `command`, `message`, `success` or `error`.
+Each payload needs to be valid JSON and contain a `type` key that is either `hello`, `join`, `leave`, `room-info`, `message`, `success` or `error`.
 Read more about these types below.
 
-## Command
+## Hello
 
-The command type requires an additional field called `cmd` with the value being `subscribe` or `unsubscribe`.
+The hello type is received by the client when connecting and contains a field called `public-rooms` with a list of public rooms.
 
-It also requires a `room` field with the value being the room to join or leave.
+Example:
+
+```json
+{ "type": "hello", "public-rooms": ["boss_timers", "update_notifications"] }
+```
+
+## Join
+
+The join type is received when a new user joins a room the client is connected to. It has a `user` field with a unique ID of the client that connected and a `room` field indicating the room that the client joined.
+
+```json
+{
+  "type": "join",
+  "room": "boss_timers",
+  "user": "80f627d1-aa78-4bf7-b9f3-7dfff1f57271"
+}
+```
+
+It is also used to join a room with the same parameters, excluding `user`:
+
+```json
+{ "type": "join", "room": "boss_timers" }
+```
+
+## Room-Info
+
+The room-info type is received when joining a room and provides a list of connected clients, not including the client itself, as UUIDs, just like those you would receive when someone joins later. It also provides information as to whether a room is read-only or not.
 
 Example:
 
 ```json
 {
-  "type": "command",
-  "cmd": "subscribe",
-  "room": "dfcdde5f-e781-49b0-bbfa-e5ee1568c83a"
+  "type": "room-info",
+  "room": "boss_timers",
+  "read-only": true,
+  "users": ["6b8802d9-1bf8-4489-866b-9c197b8ebffc"]
 }
 ```
 
-would join the `dfcdde5f-e781-49b0-bbfa-e5ee1568c83a` room.
+## Leave
+
+The leave type is received when a user leave a room the client is connected to. It has a `user` field with a unique ID of the client that left and a `room` field indicating the room that the client left.
+
+```json
+{
+  "type": "leave",
+  "room": "boss_timers",
+  "user": "449c6639-0023-4262-a0b3-453e601d344a"
+}
+```
+
+Just like join, leave can also be sent to the server to leave a room:
+
+```json
+{ "type": "leave", "room": "boss_timers" }
+```
 
 ## Message
 
-Messages are the core of the server and require at one more field: `room`. `room` is the room where the message will be sent to.
+Messages are the core of the server and require two more fields: `room` and `body`. `room` is the room where the message will be sent to.
 
-Anything else is optional and is up to the client, for example `body` or `content`-like keys.
+`body` can be any type of JSON (array, string, boolean, etc.) and should be where you place what should be relayed.
 
 We recommend encrypting the body with a shared secret key, so noone can read what is being sent apart from intended recipients.
 
-When a message is sent to the server, the client will get it echo'ed back. Ensuring you track the ID is crucial to avoid parsing it by accident.
+Example:
+
+```json
+{ "type": "message", "room": "boss_timers", "body": "hello world" }
+```
+
+When you receive a message, there will be an additional `user` field with the sender's UUID.
 
 ## Success and Error
 

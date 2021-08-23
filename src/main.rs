@@ -1,5 +1,8 @@
 #![feature(once_cell)]
-use crate::{config::CONFIG, json::from_slice};
+use crate::{
+    config::CONFIG,
+    json::{from_slice, to_string},
+};
 
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
@@ -68,97 +71,131 @@ async fn worker<S: 'static>(
         }
     });
 
-    while let Some(msg) = read.next().await {
-        if let Ok(m) = msg {
-            if m.is_ping() {
-                let _ = tx.send(Message::Pong(m.into_data()));
-                continue;
-            } else if m.is_close() {
-                break;
-            }
+    let _ = tx.send(Message::Text(format!(
+        "{{\"type\": \"hello\", \"public-rooms\": {:?}}}",
+        CONFIG
+            .public_channels
+            .iter()
+            .map(|channel| channel.name.as_str())
+            .collect::<Vec<&str>>()
+    )));
 
-            let amt = m.len();
-            debug!("{:?}", m);
-            match from_slice::<model::Payload>(&mut m.clone().into_data()) {
-                Ok(payload) => match &payload {
-                    model::Payload::Message(msg) => {
-                        if !is_admin {
-                            let _ = freq_ratelimiter.acquire_one().await;
-                            let _ = size_ratelimiter.acquire(amt as f64).await;
-                        }
+    while let Some(Ok(m)) = read.next().await {
+        if m.is_ping() {
+            let _ = tx.send(Message::Pong(m.into_data()));
+            continue;
+        } else if m.is_close() {
+            break;
+        }
 
-                        if client_rooms.contains(&msg.room) {
-                            let room = rooms.get(&msg.room).unwrap();
+        let amt = m.len();
+        debug!("{:?}", m);
+        match from_slice::<model::Payload>(&mut m.into_data()) {
+            Ok(mut payload) => match payload {
+                model::Payload::Message(ref mut msg) => {
+                    let room = msg.room.clone();
+                    msg.user = id.clone();
+                    let new_msg = Message::Text(to_string(&payload).unwrap());
 
-                            if room.0 && !is_admin {
-                                let _ =
-                                    tx.send(Message::Text(constants::ROOM_READ_ONLY.to_string()));
-                                continue;
-                            }
-
-                            for recp in room.1.iter() {
-                                if recp.key() != &id {
-                                    let _ = recp.value().send(m.clone());
-                                }
-                            }
-                        } else {
-                            let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
-                        }
+                    if !is_admin {
+                        let _ = freq_ratelimiter.acquire_one().await;
+                        let _ = size_ratelimiter.acquire(amt as f64).await;
                     }
-                    model::Payload::Command(cmd) => match cmd {
-                        model::Command::Join(j) => {
-                            if constants::is_valid_room(&j.room)
-                                || CONFIG.public_channels.iter().any(|c| c.name == j.room)
-                            {
-                                client_rooms.insert(j.room.clone());
 
-                                if let Some(conns) = rooms.get(&j.room) {
-                                    conns.value().1.insert(id.clone(), tx.clone());
-                                } else {
-                                    let map = DashMap::new();
-                                    map.insert(id.clone(), tx.clone());
-                                    rooms.insert(j.room.clone(), (false, map));
-                                }
+                    if client_rooms.contains(&room) {
+                        let room = rooms.get(&room).unwrap();
 
-                                let _ =
-                                    tx.send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
-                            } else {
-                                let _ = tx.send(Message::Text(
-                                    constants::ROOM_NAME_TOO_SHORT.to_string(),
-                                ));
+                        if room.0 && !is_admin {
+                            let _ = tx.send(Message::Text(constants::ROOM_READ_ONLY.to_string()));
+                            continue;
+                        }
+
+                        for recp in room.1.iter() {
+                            if recp.key() != &id {
+                                let _ = recp.value().send(new_msg.clone());
                             }
                         }
-                        model::Command::Leave(l) => {
-                            let was_in_room = client_rooms.remove(&l.room).is_some();
-                            if was_in_room {
-                                let conns = rooms.get(&l.room);
-                                if let Some(c) = conns {
-                                    if c.1.len() == 1
-                                        && !CONFIG.public_channels.iter().any(|c| c.name == l.room)
-                                    {
-                                        drop(c);
-                                        debug!("Deleting room");
-                                        rooms.remove(&l.room);
-                                    } else {
-                                        debug!("Leaving room");
-                                        c.1.remove(&id);
-                                    }
-
-                                    debug!("Rooms: {:?}", rooms);
-                                }
-                                let _ =
-                                    tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
-                            } else {
-                                let _ =
-                                    tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
-                            }
-                        }
-                    },
-                },
-                Err(e) => {
-                    debug!("Error in JSON: {:?}", e);
-                    let _ = tx.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
+                    } else {
+                        let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                    }
                 }
+                model::Payload::Join(j) => {
+                    if constants::is_valid_room(&j.room)
+                        || CONFIG.public_channels.iter().any(|c| c.name == j.room)
+                    {
+                        client_rooms.insert(j.room.clone());
+
+                        let room_info = if let Some(conns) = rooms.get(&j.room) {
+                            let msg = Message::text(format!(
+                                "{{\"type\": \"join\", \"room\": \"{}\", \"user\": \"{}\"}}",
+                                j.room, id
+                            ));
+
+                            for recp in conns.1.iter() {
+                                let _ = recp.send(msg.clone());
+                            }
+
+                            let users: Vec<String> =
+                                conns.1.iter().map(|e| e.key().to_string()).collect();
+                            conns.value().1.insert(id.clone(), tx.clone());
+
+                            format!(
+                                    "{{\"type\": \"room-info\", \"room\": \"{}\", \"read-only\": {}, \"users\": {:?}}}",
+                                    j.room, conns.0, users
+                                )
+                        } else {
+                            let map = DashMap::new();
+                            map.insert(id.clone(), tx.clone());
+                            rooms.insert(j.room.clone(), (false, map));
+
+                            format!(
+                                    "{{\"type\": \"room-info\", \"room\": \"{}\", \"read-only\": false, \"users\": []}}",
+                                    j.room
+                                )
+                        };
+
+                        let _ = tx.send(Message::Text(constants::ROOM_JOIN_MSG.to_string()));
+                        let _ = tx.send(Message::Text(room_info));
+                    } else {
+                        let _ = tx.send(Message::Text(constants::ROOM_NAME_TOO_SHORT.to_string()));
+                    }
+                }
+                model::Payload::Leave(l) => {
+                    let was_in_room = client_rooms.remove(&l.room).is_some();
+                    if was_in_room {
+                        let conns = rooms.get(&l.room);
+                        if let Some(c) = conns {
+                            if c.1.len() == 1
+                                && !CONFIG.public_channels.iter().any(|c| c.name == l.room)
+                            {
+                                drop(c);
+                                debug!("Deleting room");
+                                rooms.remove(&l.room);
+                            } else {
+                                debug!("Leaving room");
+                                c.1.remove(&id);
+
+                                let msg = Message::Text(format!(
+                                    "{{\"type\": \"leave\", \"room\": \"{}\", \"user\": \"{}\"}}",
+                                    l.room, id
+                                ));
+
+                                for recp in c.1.iter() {
+                                    let _ = recp.send(msg.clone());
+                                }
+                            }
+
+                            debug!("Rooms: {:?}", rooms);
+                        }
+                        let _ = tx.send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
+                    } else {
+                        let _ = tx.send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+                    }
+                }
+            },
+            Err(e) => {
+                debug!("Error in JSON: {:?}", e);
+                let _ = tx.send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
             }
         }
     }
@@ -174,6 +211,16 @@ async fn worker<S: 'static>(
             } else {
                 debug!("Leaving room");
                 c.1.remove(&id);
+
+                let msg = Message::Text(format!(
+                    "{{\"type\": \"leave\", \"room\": \"{}\", \"user\": \"{}\"}}",
+                    room.key(),
+                    id
+                ));
+
+                for recp in c.1.iter() {
+                    let _ = recp.send(msg.clone());
+                }
             }
 
             debug!("Rooms: {:?}", rooms);

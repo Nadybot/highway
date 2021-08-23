@@ -1,29 +1,28 @@
-use serde::Deserialize;
+use crate::json::Value;
 
-#[derive(Deserialize, Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
     pub room: String,
+    #[serde(skip_deserializing)]
+    pub user: String,
+    #[serde(default)]
+    pub body: Value,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "cmd")]
-pub enum Command {
-    #[serde(rename = "subscribe")]
-    Join(JoinOrLeavePayload),
-    #[serde(rename = "unsubscribe")]
-    Leave(JoinOrLeavePayload),
-}
-
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct JoinOrLeavePayload {
     pub room: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Payload {
     #[serde(rename = "message")]
     Message(Message),
-    #[serde(rename = "command")]
-    Command(Command),
+    #[serde(rename = "join")]
+    Join(JoinOrLeavePayload),
+    #[serde(rename = "leave")]
+    Leave(JoinOrLeavePayload),
 }
