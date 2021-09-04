@@ -9,10 +9,11 @@ ARG FINAL_TARGET="x86_64"
 FROM docker.io/library/alpine:edge AS builder
 ARG MUSL_TARGET
 ARG RUST_TARGET
+ENV RUSTFLAGS="-Lnative=/usr/lib"
 
 RUN apk upgrade && \
     apk add curl gcc musl-dev && \
-    curl -sSf https://sh.rustup.rs | sh -s -- --profile minimal --default-toolchain nightly -y
+    curl -sSf https://sh.rustup.rs | sh -s -- --profile minimal --component rust-src --default-toolchain nightly -y
 
 RUN source $HOME/.cargo/env && \
     if [ "$RUST_TARGET" != $(rustup target list --installed) ]; then \
