@@ -27,12 +27,13 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: rust-src
 
       - name: Build for x86_64
         run: |
-          cargo build --release --features simd
-          strip target/release/highway
-          cp target/release/highway highway-linux-x86_64
+          cargo build --release --target=x86_64-unknown-linux-gnu --features simd
+          strip target/x86_64-unknown-linux-gnu/release/highway
+          cp target/x86_64-unknown-linux-gnu/release/highway highway-linux-x86_64
 
       - name: Set up Rust for aarch64
         uses: actions-rs/toolchain@v1
@@ -41,6 +42,7 @@ jobs:
           toolchain: nightly
           target: aarch64-unknown-linux-gnu
           override: true
+          components: rust-src
 
       - name: Build for aarch64
         run: |
@@ -55,6 +57,7 @@ jobs:
           toolchain: nightly
           target: armv7-unknown-linux-gnueabihf
           override: true
+          components: rust-src
 
       - name: Build for armv7
         run: |
@@ -92,10 +95,12 @@ jobs:
           toolchain: nightly
           target: x86_64-unknown-freebsd
           override: true
+          components: rust-src
 
       - name: Build for FreeBSD x86_64
         run: |
           cargo build --release --target=x86_64-unknown-freebsd --features simd
+          strip target/x86_64-unknown-freebsd/release/highway
           cp target/x86_64-unknown-freebsd/release/highway highway-freebsd-x86_64
 
       - name: Upload artifacts
@@ -118,11 +123,13 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: rust-src
 
       - name: Build
         run: |
-          cargo build --release
-          cp target/release/highway highway-macos
+          cargo build --release --target=x86_64-apple-darwin --features simd
+          strip target/x86_64-apple-darwin/release/highway
+          cp target/x86_64-apple-darwin/release/highway highway-macos
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
@@ -144,11 +151,12 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: rust-src
 
       - name: Build
         run: |
-          cargo build --release --features simd
-          cp target/release/highway.exe highway-windows.exe
+          cargo build --release --target=x86_64-pc-windows-gnu --features simd
+          cp target/x86_64-pc-windows-gnu/release/highway.exe highway-windows.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
