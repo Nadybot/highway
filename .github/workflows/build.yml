@@ -155,8 +155,8 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --target=x86_64-pc-windows-gnu --features simd
-          cp target/x86_64-pc-windows-gnu/release/highway.exe highway-windows.exe
+          cargo build --release --target=x86_64-pc-windows-msvc --features simd
+          cp target/x86_64-pc-windows-msvc/release/highway.exe highway-windows.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v2
