@@ -4,10 +4,14 @@ highway is a concurrent, multithreaded websocket server. It allows clients to co
 
 ## Running
 
+From source:
+
 ```sh
 cargo build --release
 ./target/release/highway
 ```
+
+Alternatively, you can download a prebuilt binary from the CI by going [here](https://github.com/Nadybot/highway/actions), clicking on the first run with a green checkmark, scrolling down slightly to "Artifacts" and then selecting your operating system.
 
 highway runs with sensible defaults, to override them, create a file called `config.json` with these contents:
 
@@ -94,7 +98,7 @@ Example:
 
 ## Leave
 
-The leave type is received when a user leave a room the client is connected to. It has a `user` field with a unique ID of the client that left and a `room` field indicating the room that the client left.
+The leave type is received when a user leaves a room the client is connected to. It has a `user` field with a unique ID of the client that left and a `room` field indicating the room that the client left.
 
 ```json
 {
