@@ -232,7 +232,7 @@ impl Peer {
     }
 
     /// Leave a room.
-    fn leave(self: &Arc<Self>, room_name: &str) {
+    fn leave(&self, room_name: &str) {
         if let Some(room) = self.rooms.remove(room_name) {
             room.unsubscribe(self);
             debug!("{} unsubscribed from room {}", self.id, room_name);
@@ -243,7 +243,7 @@ impl Peer {
     }
 
     /// Join a room.
-    fn join(self: &Arc<Self>, room_name: &str) {
+    fn join(&self, room_name: &str) {
         debug!("{} requested to join room {}", self.id, room_name);
 
         if !(constants::is_valid_room(room_name)
@@ -283,7 +283,7 @@ impl Peer {
     }
 
     /// Send a message in a room.
-    fn send_message(self: &Arc<Self>, room: &str, payload: &model::Payload) {
+    fn send_message(&self, room: &str, payload: &model::Payload) {
         let message = Message::Text(to_string(payload).expect("Will always be valid JSON"));
 
         if let Some(room) = self.rooms.get(room) {
@@ -298,7 +298,7 @@ impl Peer {
     }
 
     /// Handle incoming websocket byte or text data.
-    async fn on_message(self: Arc<Self>, mut data: Vec<u8>) {
+    async fn on_message(&self, mut data: Vec<u8>) {
         match from_slice::<model::Payload>(&mut data) {
             Ok(mut payload) => match payload {
                 model::Payload::Message(ref mut msg) => {
