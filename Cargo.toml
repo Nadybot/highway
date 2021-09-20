@@ -15,6 +15,7 @@ env_logger = { version = "0.9", default-features = false, features = [
 ] }
 leaky-bucket-lite = "0.3"
 log = "0.4"
+parking_lot = { version = "0.11", features = ["nightly"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 simd-json = { version = "0.4", default-features = false, features = [
@@ -24,7 +25,8 @@ simd-json = { version = "0.4", default-features = false, features = [
 ], optional = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
-    "macros"
+    "macros",
+    "parking_lot"
 ] }
 argon2 = { version = "0.3", default-features = false, features = ["password-hash", "alloc"] }
 uuid = { version = "0.8", default-features = false, features = ["v4"] }
