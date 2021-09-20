@@ -80,8 +80,6 @@ impl GlobalState {
             }
 
             entry.connection_count += 1;
-
-            true
         } else {
             self.connections.insert(
                 *ip,
@@ -91,9 +89,9 @@ impl GlobalState {
                     size_ratelimiter: Arc::new(get_size_ratelimiter()),
                 },
             );
-
-            true
         }
+
+        true
     }
 
     /// Decreases the connection counter for the IP address.
@@ -453,7 +451,6 @@ impl Room {
                     let _res = tx.send(msg);
                 }
             }
-            debug!("Message stream from room ended");
         });
 
         self.inner.tasks.insert(peer.id.clone(), task);
@@ -465,6 +462,12 @@ impl Room {
             task.1.abort();
         }
         self.announce_leave(&peer.id);
+
+        if self.inner.sender.receiver_count() == 1 && !self.inner.read_only {
+            // All members left
+            debug!("Deleting room {}", self.inner.name);
+            peer.global_state.rooms.remove(self.inner.name.as_str());
+        }
     }
 }
 
