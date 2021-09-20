@@ -488,20 +488,6 @@ impl Borrow<str> for Room {
     }
 }
 
-impl Hash for Peer {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl PartialEq for Peer {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for Peer {}
-
 type PeerRef = Arc<Peer>;
 type GlobalStateRef = Arc<GlobalState>;
 
