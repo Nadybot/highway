@@ -1,6 +1,10 @@
 #![feature(once_cell)]
+#![feature(option_result_contains)]
+#![deny(clippy::pedantic)]
+#![allow(clippy::cast_precision_loss)]
 use crate::{
     config::CONFIG,
+    constants::{get_freq_ratelimiter, get_size_ratelimiter},
     json::{from_slice, to_string},
 };
 
@@ -8,7 +12,6 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
-use constants::{get_freq_ratelimiter, get_size_ratelimiter};
 use dashmap::{DashMap, DashSet};
 use futures_util::{
     stream::{SplitSink, SplitStream},
@@ -50,6 +53,7 @@ mod constants;
 mod json;
 mod model;
 
+/// A single IP's connection state.
 struct ClientState {
     /// Number of connections by this client.
     connection_count: usize,
@@ -129,6 +133,7 @@ struct Peer {
 }
 
 impl Peer {
+    /// Start handling packets from a raw websocket stream.
     fn start_from_stream<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
         global_state: GlobalStateRef,
         ip: IpAddr,
@@ -173,42 +178,42 @@ impl Peer {
 
     #[inline]
     fn successfully_joined_the_room(&self) {
-        let _ = self
+        let _res = self
             .sender
             .send(Message::Text(constants::ROOM_JOIN_MSG.to_string()));
     }
 
     #[inline]
     fn successfully_left_the_room(&self) {
-        let _ = self
+        let _res = self
             .sender
             .send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
     }
 
     #[inline]
     fn room_name_too_short(&self) {
-        let _ = self
+        let _res = self
             .sender
             .send(Message::Text(constants::ROOM_NAME_TOO_SHORT.to_string()));
     }
 
     #[inline]
     fn invalid_room(&self) {
-        let _ = self
+        let _res = self
             .sender
             .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
     }
 
     #[inline]
     fn room_read_only(&self) {
-        let _ = self
+        let _res = self
             .sender
             .send(Message::Text(constants::ROOM_READ_ONLY.to_string()));
     }
 
     #[inline]
     fn hello(&self) {
-        let _ = self.sender.send(Message::Text(format!(
+        let _res = self.sender.send(Message::Text(format!(
             "{{\"type\": \"hello\", \"public-rooms\": {:?}}}",
             CONFIG
                 .public_channels
@@ -219,13 +224,14 @@ impl Peer {
     }
 
     #[inline]
-    fn room_info(&self, room_name: &str, read_only: bool, members: Vec<String>) {
-        let _ = self.sender.send(Message::Text(format!(
+    fn room_info(&self, room_name: &str, read_only: bool, members: &[String]) {
+        let _res = self.sender.send(Message::Text(format!(
             "{{\"type\": \"room-info\", \"room\": \"{}\", \"read-only\": {}, \"users\": {:?}}}",
             room_name, read_only, members
         )));
     }
 
+    /// Leave a room.
     fn leave(self: &Arc<Self>, room_name: &str) {
         if let Some(room) = self.rooms.remove(room_name) {
             room.unsubscribe(self);
@@ -236,6 +242,7 @@ impl Peer {
         }
     }
 
+    /// Join a room.
     fn join(self: &Arc<Self>, room_name: &str) {
         debug!("{} requested to join room {}", self.id, room_name);
 
@@ -261,40 +268,42 @@ impl Peer {
             self.rooms.insert(room.clone());
 
             self.successfully_joined_the_room();
-            self.room_info(room_name, room.inner.read_only, subscribed);
+            self.room_info(room_name, room.inner.read_only, &subscribed);
         } else {
             debug!("Room {} does not exist, creating", room_name);
 
             let room = Room::new(room_name.to_string(), false);
             room.subscribe(self);
             self.rooms.insert(room.clone());
-            self.global_state.rooms.insert(room.clone());
+            self.global_state.rooms.insert(room);
 
             self.successfully_joined_the_room();
-            self.room_info(room_name, false, Vec::new());
+            self.room_info(room_name, false, &[]);
         }
     }
 
-    fn send_message(self: &Arc<Self>, room: &str, payload: model::Payload) {
-        let message = Message::Text(to_string(&payload).expect("Will always be valid JSON"));
+    /// Send a message in a room.
+    fn send_message(self: &Arc<Self>, room: &str, payload: &model::Payload) {
+        let message = Message::Text(to_string(payload).expect("Will always be valid JSON"));
 
         if let Some(room) = self.rooms.get(room) {
             if room.inner.read_only && !self.is_admin {
                 self.room_read_only();
             } else {
-                room.broadcast(message);
+                room.broadcast(message, Some(self.id.clone()));
             }
         } else {
             self.invalid_room();
         }
     }
 
+    /// Handle incoming websocket byte or text data.
     async fn on_message(self: Arc<Self>, mut data: Vec<u8>) {
         match from_slice::<model::Payload>(&mut data) {
             Ok(mut payload) => match payload {
                 model::Payload::Message(ref mut msg) => {
                     msg.user = self.id.clone();
-                    self.send_message(&msg.room.clone(), payload);
+                    self.send_message(&msg.room.clone(), &payload);
                 }
                 model::Payload::Join(join_payload) => {
                     self.join(&join_payload.room);
@@ -305,24 +314,26 @@ impl Peer {
             },
             Err(e) => {
                 debug!("Error in JSON: {:?}", e);
-                let _ = self
+                let _res = self
                     .sender
                     .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
             }
         }
     }
 
+    /// Write all packets to the websocket stream.
     async fn write_task<S: AsyncWrite + AsyncRead + Unpin>(
         mut sink: SplitSink<WebSocketStream<S>, Message>,
         mut receiver: UnboundedReceiver<Message>,
     ) {
         while let Some(msg) = receiver.recv().await {
-            if let Err(_) = sink.send(msg).await {
+            if sink.send(msg).await.is_err() {
                 break;
-            };
+            }
         }
     }
 
+    /// Read packets from the websocket stream and handle them.
     async fn read_task<S: AsyncRead + AsyncWrite + Unpin>(
         peer: PeerRef,
         mut stream: SplitStream<WebSocketStream<S>>,
@@ -332,7 +343,7 @@ impl Peer {
 
             match msg {
                 Message::Ping(payload) => {
-                    let _ = peer.sender.send(Message::Pong(payload));
+                    let _res = peer.sender.send(Message::Pong(payload));
                 }
                 Message::Close(_) => break,
                 Message::Binary(_) | Message::Text(_) => {
@@ -371,17 +382,19 @@ struct RoomInner {
     /// Whether or not this room is read-only.
     read_only: bool,
     /// Sender for messages in this room.
-    sender: BroadcastSender<Message>,
+    sender: BroadcastSender<(Message, Option<String>)>,
     /// Subcribed peer proxy tasks.
     tasks: DashMap<String, JoinHandle<()>>,
 }
 
+/// Wrapper around `RoomInner` to allow indexing room maps by strings.
 #[derive(PartialEq, Eq, Clone, Hash)]
 struct Room {
     inner: Arc<RoomInner>,
 }
 
 impl Room {
+    /// Create a new room.
     fn new(name: String, read_only: bool) -> Self {
         let (sender, _) = brodcast(20);
         Self {
@@ -394,26 +407,30 @@ impl Room {
         }
     }
 
+    /// Announce that a user joined this room.
     fn announce_join(&self, id: &str) {
         let msg = Message::text(format!(
             "{{\"type\": \"join\", \"room\": \"{}\", \"user\": \"{}\"}}",
             self.inner.name, id
         ));
-        self.broadcast(msg);
+        self.broadcast(msg, None);
     }
 
+    /// Announce that a user left this room.
     fn announce_leave(&self, id: &str) {
         let msg = Message::text(format!(
             "{{\"type\": \"leave\", \"room\": \"{}\", \"user\": \"{}\"}}",
             self.inner.name, id
         ));
-        self.broadcast(msg);
+        self.broadcast(msg, None);
     }
 
-    fn broadcast(&self, msg: Message) {
-        let _ = self.inner.sender.send(msg);
+    /// Broadcast a message to all members, optionally providing a peer ID who sent this message.
+    fn broadcast(&self, msg: Message, sender: Option<String>) {
+        let _res = self.inner.sender.send((msg, sender));
     }
 
+    /// Returns a list of subscribed peer IDs.
     fn subscribed(&self) -> Vec<String> {
         self.inner
             .tasks
@@ -422,15 +439,19 @@ impl Room {
             .collect()
     }
 
+    /// Subscribe a peer to this room.
     fn subscribe(&self, peer: &Peer) {
-        self.announce_join(&peer.id);
+        let peer_id = peer.id.clone();
+        self.announce_join(&peer_id);
         let mut rx = self.inner.sender.subscribe();
         let tx = peer.sender.clone();
 
         let task = tokio::spawn(async move {
             debug!("Subcribed to messages from room");
-            while let Ok(msg) = rx.recv().await {
-                let _ = tx.send(msg);
+            while let Ok((msg, sender)) = rx.recv().await {
+                if !sender.contains(&peer_id) {
+                    let _res = tx.send(msg);
+                }
             }
             debug!("Message stream from room ended");
         });
@@ -438,9 +459,10 @@ impl Room {
         self.inner.tasks.insert(peer.id.clone(), task);
     }
 
+    /// Unsubscribe a peer from this room.
     fn unsubscribe(&self, peer: &Peer) {
         if let Some(task) = self.inner.tasks.remove(&peer.id) {
-            task.1.abort()
+            task.1.abort();
         }
         self.announce_leave(&peer.id);
     }
@@ -483,6 +505,7 @@ impl Eq for Peer {}
 type PeerRef = Arc<Peer>;
 type GlobalStateRef = Arc<GlobalState>;
 
+/// Handle a TCP connection and perform a websocket handshake.
 async fn handle_connection(
     raw_stream: TcpStream,
     addr: SocketAddr,
