@@ -18,7 +18,8 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 use leaky_bucket_lite::LeakyBucket;
-use log::{debug, info};
+use log::{debug, error, info};
+use parking_lot::Mutex;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
@@ -41,6 +42,7 @@ use uuid::Uuid;
 
 use std::{
     borrow::Borrow,
+    collections::HashMap,
     env::{set_var, var},
     hash::{Hash, Hasher},
     io::Error as IoError,
@@ -68,20 +70,21 @@ struct GlobalState {
     /// All rooms currently existing in the server.
     rooms: DashSet<Room>,
     /// Current connection state from clients.
-    connections: DashMap<IpAddr, ClientState>,
+    connections: Mutex<HashMap<IpAddr, ClientState>>,
 }
 
 impl GlobalState {
     /// Increases the connection counter for the IP address and returns false if limit is exceeded, else true.
     fn client_connected(&self, ip: &IpAddr) -> bool {
-        if let Some(mut entry) = self.connections.get_mut(ip) {
+        let mut connections = self.connections.lock();
+        if let Some(mut entry) = connections.get_mut(ip) {
             if entry.connection_count + 1 > CONFIG.connections_per_ip {
                 return false;
             }
 
             entry.connection_count += 1;
         } else {
-            self.connections.insert(
+            connections.insert(
                 *ip,
                 ClientState {
                     connection_count: 1,
@@ -96,8 +99,8 @@ impl GlobalState {
 
     /// Decreases the connection counter for the IP address.
     fn client_disconnected(&self, ip: &IpAddr) {
-        let mut entry = self
-            .connections
+        let mut connections = self.connections.lock();
+        let mut entry = connections
             .get_mut(ip)
             .expect("Must have been connected previously");
         entry.connection_count -= 1;
@@ -105,7 +108,7 @@ impl GlobalState {
         if entry.connection_count == 0 {
             drop(entry);
             debug!("Client {} disconnected last connection, removing data", ip);
-            self.connections.remove(ip);
+            connections.remove(ip);
         }
     }
 }
@@ -147,10 +150,8 @@ impl Peer {
         let (sender, receiver) = unbounded_channel();
 
         let (freq_ratelimiter, size_ratelimiter) = {
-            let client_state = global_state
-                .connections
-                .get(&ip)
-                .expect("client is connected already");
+            let connections = global_state.connections.lock();
+            let client_state = connections.get(&ip).expect("client is connected already");
             (
                 client_state.freq_ratelimiter.clone(),
                 client_state.size_ratelimiter.clone(),
@@ -171,7 +172,7 @@ impl Peer {
         peer.hello();
 
         tokio::spawn(Peer::read_task(peer, read));
-        tokio::spawn(Peer::write_task(write, receiver));
+        tokio::spawn(Peer::write_task(ip, write, receiver));
     }
 
     #[inline]
@@ -321,14 +322,20 @@ impl Peer {
 
     /// Write all packets to the websocket stream.
     async fn write_task<S: AsyncWrite + AsyncRead + Unpin>(
+        ip: IpAddr,
         mut sink: SplitSink<WebSocketStream<S>, Message>,
         mut receiver: UnboundedReceiver<Message>,
     ) {
         while let Some(msg) = receiver.recv().await {
+            debug!("{} <- {:?}", ip, msg);
+
             if sink.send(msg).await.is_err() {
+                error!("Failed to send message to websocket sink");
                 break;
             }
         }
+
+        debug!("Message stream from mpsc channel ended");
     }
 
     /// Read packets from the websocket stream and handle them.
@@ -337,7 +344,7 @@ impl Peer {
         mut stream: SplitStream<WebSocketStream<S>>,
     ) {
         while let Some(Ok(msg)) = stream.next().await {
-            debug!("{:?}", msg);
+            debug!("{} -> {:?}", peer.ip, msg);
 
             match msg {
                 Message::Ping(payload) => {
@@ -551,7 +558,7 @@ async fn main() -> Result<(), IoError> {
     let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
     let global_state = Arc::new(GlobalState {
         rooms: DashSet::new(),
-        connections: DashMap::new(),
+        connections: Mutex::new(HashMap::new()),
     });
 
     for room in &CONFIG.public_channels {
