@@ -23,11 +23,7 @@ use parking_lot::Mutex;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
-    sync::{
-        broadcast::{channel as brodcast, Sender as BroadcastSender},
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    },
-    task::JoinHandle,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
 use tokio_tungstenite::{
     accept_hdr_async_with_config,
@@ -386,10 +382,8 @@ struct RoomInner {
     name: String,
     /// Whether or not this room is read-only.
     read_only: bool,
-    /// Sender for messages in this room.
-    sender: BroadcastSender<(Message, Option<String>)>,
-    /// Subcribed peer proxy tasks.
-    tasks: DashMap<String, JoinHandle<()>>,
+    /// Subcribed peer senders.
+    senders: DashMap<String, UnboundedSender<Message>>,
 }
 
 /// Wrapper around `RoomInner` to allow indexing room maps by strings.
@@ -401,13 +395,11 @@ struct Room {
 impl Room {
     /// Create a new room.
     fn new(name: String, read_only: bool) -> Self {
-        let (sender, _) = brodcast(20);
         Self {
             inner: Arc::new(RoomInner {
                 name,
                 read_only,
-                sender,
-                tasks: DashMap::new(),
+                senders: DashMap::new(),
             }),
         }
     }
@@ -432,13 +424,17 @@ impl Room {
 
     /// Broadcast a message to all members, optionally providing a peer ID who sent this message.
     fn broadcast(&self, msg: Message, sender: Option<String>) {
-        let _res = self.inner.sender.send((msg, sender));
+        for send_handle in self.inner.senders.iter() {
+            if !sender.contains(send_handle.key()) {
+                let _res = send_handle.send(msg.clone());
+            }
+        }
     }
 
     /// Returns a list of subscribed peer IDs.
     fn subscribed(&self) -> Vec<String> {
         self.inner
-            .tasks
+            .senders
             .iter()
             .map(|e| e.key().to_string())
             .collect()
@@ -446,31 +442,21 @@ impl Room {
 
     /// Subscribe a peer to this room.
     fn subscribe(&self, peer: &Peer) {
-        let peer_id = peer.id.clone();
-        self.announce_join(&peer_id);
-        let mut rx = self.inner.sender.subscribe();
-        let tx = peer.sender.clone();
+        self.announce_join(&peer.id);
 
-        let task = tokio::spawn(async move {
-            debug!("Subcribed to messages from room");
-            while let Ok((msg, sender)) = rx.recv().await {
-                if !sender.contains(&peer_id) {
-                    let _res = tx.send(msg);
-                }
-            }
-        });
+        debug!("Subcribed to messages from room");
 
-        self.inner.tasks.insert(peer.id.clone(), task);
+        self.inner
+            .senders
+            .insert(peer.id.clone(), peer.sender.clone());
     }
 
     /// Unsubscribe a peer from this room.
     fn unsubscribe(&self, peer: &Peer) {
-        if let Some(task) = self.inner.tasks.remove(&peer.id) {
-            task.1.abort();
-        }
+        self.inner.senders.remove(&peer.id);
         self.announce_leave(&peer.id);
 
-        if self.inner.sender.receiver_count() == 1 && !self.inner.read_only {
+        if self.inner.senders.len() == 0 && !self.inner.read_only {
             // All members left
             debug!("Deleting room {}", self.inner.name);
             peer.global_state.rooms.remove(self.inner.name.as_str());
