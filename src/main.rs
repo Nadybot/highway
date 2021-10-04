@@ -102,7 +102,6 @@ impl GlobalState {
         entry.connection_count -= 1;
 
         if entry.connection_count == 0 {
-            drop(entry);
             debug!("Client {} disconnected last connection, removing data", ip);
             connections.remove(ip);
         }
@@ -285,7 +284,7 @@ impl Peer {
             if room.inner.read_only && !self.is_admin {
                 self.room_read_only();
             } else {
-                room.broadcast(message, Some(self.id.clone()));
+                room.broadcast(&message, Some(&self.id));
             }
         } else {
             self.invalid_room();
@@ -293,7 +292,7 @@ impl Peer {
     }
 
     /// Handle incoming websocket byte or text data.
-    async fn on_message(&self, mut data: Vec<u8>) {
+    fn on_message(&self, mut data: Vec<u8>) {
         match from_slice::<model::Payload>(&mut data) {
             Ok(mut payload) => match payload {
                 model::Payload::Message(ref mut msg) => {
@@ -349,16 +348,13 @@ impl Peer {
                 Message::Close(_) => break,
                 Message::Binary(_) | Message::Text(_) => {
                     let payload = msg.into_data();
-                    let peer_clone = peer.clone();
 
                     if !peer.is_admin {
                         let _ = peer.freq_ratelimiter.acquire_one().await;
                         let _ = peer.size_ratelimiter.acquire(payload.len() as f64).await;
                     }
 
-                    tokio::spawn(async move {
-                        peer_clone.on_message(payload).await;
-                    });
+                    peer.on_message(payload);
                 }
                 Message::Pong(_) => {}
             }
@@ -410,7 +406,7 @@ impl Room {
             "{{\"type\": \"join\", \"room\": \"{}\", \"user\": \"{}\"}}",
             self.inner.name, id
         ));
-        self.broadcast(msg, None);
+        self.broadcast(&msg, None);
     }
 
     /// Announce that a user left this room.
@@ -419,11 +415,11 @@ impl Room {
             "{{\"type\": \"leave\", \"room\": \"{}\", \"user\": \"{}\"}}",
             self.inner.name, id
         ));
-        self.broadcast(msg, None);
+        self.broadcast(&msg, None);
     }
 
     /// Broadcast a message to all members, optionally providing a peer ID who sent this message.
-    fn broadcast(&self, msg: Message, sender: Option<String>) {
+    fn broadcast(&self, msg: &Message, sender: Option<&str>) {
         for send_handle in self.inner.senders.iter() {
             if !sender.contains(send_handle.key()) {
                 let _res = send_handle.send(msg.clone());
@@ -456,7 +452,7 @@ impl Room {
         self.inner.senders.remove(&peer.id);
         self.announce_leave(&peer.id);
 
-        if self.inner.senders.len() == 0 && !self.inner.read_only {
+        if self.inner.senders.is_empty() && !self.inner.read_only {
             // All members left
             debug!("Deleting room {}", self.inner.name);
             peer.global_state.rooms.remove(self.inner.name.as_str());
