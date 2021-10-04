@@ -166,7 +166,7 @@ impl Peer {
 
         peer.hello();
 
-        tokio::spawn(Peer::read_task(peer, read));
+        tokio::spawn(async move { peer.read_task(read).await });
         tokio::spawn(Peer::write_task(ip, write, receiver));
     }
 
@@ -335,40 +335,40 @@ impl Peer {
 
     /// Read packets from the websocket stream and handle them.
     async fn read_task<S: AsyncRead + AsyncWrite + Unpin>(
-        peer: PeerRef,
+        &self,
         mut stream: SplitStream<WebSocketStream<S>>,
     ) {
         while let Some(Ok(msg)) = stream.next().await {
-            debug!("{} -> {:?}", peer.ip, msg);
+            debug!("{} -> {:?}", self.ip, msg);
 
             match msg {
                 Message::Ping(payload) => {
-                    let _res = peer.sender.send(Message::Pong(payload));
+                    let _res = self.sender.send(Message::Pong(payload));
                 }
                 Message::Close(_) => break,
                 Message::Binary(_) | Message::Text(_) => {
                     let payload = msg.into_data();
 
-                    if !peer.is_admin {
-                        let _ = peer.freq_ratelimiter.acquire_one().await;
-                        let _ = peer.size_ratelimiter.acquire(payload.len() as f64).await;
+                    if !self.is_admin {
+                        let _ = self.freq_ratelimiter.acquire_one().await;
+                        let _ = self.size_ratelimiter.acquire(payload.len() as f64).await;
                     }
 
-                    peer.on_message(payload);
+                    self.on_message(payload);
                 }
                 Message::Pong(_) => {}
             }
         }
 
-        info!("Client from {} disconnected", peer.ip);
+        info!("Client from {} disconnected", self.ip);
 
-        for room in peer.rooms.iter() {
-            room.unsubscribe(&peer);
+        for room in self.rooms.iter() {
+            room.unsubscribe(self);
         }
 
-        peer.rooms.clear();
+        self.rooms.clear();
 
-        peer.global_state.client_disconnected(&peer.ip);
+        self.global_state.client_disconnected(&self.ip);
     }
 }
 
@@ -480,7 +480,6 @@ impl Borrow<str> for Room {
     }
 }
 
-type PeerRef = Arc<Peer>;
 type GlobalStateRef = Arc<GlobalState>;
 
 /// Handle a TCP connection and perform a websocket handshake.
