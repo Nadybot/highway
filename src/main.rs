@@ -208,12 +208,17 @@ impl Peer {
     #[inline]
     fn hello(&self) {
         let _res = self.sender.send(Message::Text(format!(
-            "{{\"type\": \"hello\", \"public-rooms\": {:?}}}",
+            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_per_sec\": {}, \"bytes_per_10_sec\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
             CONFIG
                 .public_channels
                 .iter()
                 .map(|channel| channel.name.as_str())
-                .collect::<Vec<&str>>()
+                .collect::<Vec<&str>>(),
+            CONFIG.connections_per_ip,
+            CONFIG.msg_per_sec,
+            CONFIG.bytes_per_10_sec,
+            CONFIG.max_message_size,
+            CONFIG.max_frame_size
         )));
     }
 

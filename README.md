@@ -55,12 +55,22 @@ Read more about these types below.
 
 ## Hello
 
-The hello type is received by the client when connecting and contains a field called `public-rooms` with a list of public rooms.
+The hello type is received by the client when connecting and contains a field called `public-rooms` with a list of public rooms as well as a `config` field with the config parameters that are used for ratelimiting.
 
 Example:
 
 ```json
-{ "type": "hello", "public-rooms": ["boss_timers", "update_notifications"] }
+{
+  "type": "hello",
+  "public-rooms": ["boss_timers", "update_notifications"],
+  "config": {
+    "connections_per_ip": 50,
+    "msg_per_sec": 10,
+    "bytes_per_10_sec": 5242880,
+    "max_message_size": 1048576,
+    "max_frame_size": 1048576
+  }
+}
 ```
 
 ## Join
