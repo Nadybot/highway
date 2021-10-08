@@ -3,7 +3,7 @@ use crate::config::CONFIG;
 use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
 
-pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to interact with a room that you are not subscribed to\"}";
+pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to interact with an invalid room, either because you are subscribed and trying to subscribe again or because you are not subscribed and unsubscribing or sending a message\"}";
 pub const ROOM_NAME_TOO_SHORT: &str =
     "{\"type\": \"error\", \"message\": \"The room name provided is shorter than 32 characters\"}";
 pub const ROOM_READ_ONLY: &str = "{\"type\": \"error\", \"message\": \"The room you attempted to send a message in is in read-only mode\"}";
