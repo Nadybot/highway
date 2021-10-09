@@ -269,6 +269,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "leaky-bucket-lite",
+ "libc",
  "log",
  "parking_lot",
  "serde",

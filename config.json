@@ -14,5 +14,6 @@
         {
             "name": "update_notifications"
         }
-    ]
+    ],
+    "behind_proxy": true
 }

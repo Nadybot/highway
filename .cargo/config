@@ -1,4 +1,5 @@
-rustflags = ["-Z", "mir-opt-level=3"]
+[build]
+rustflags = ["-Z", "mir-opt-level=3", "-Z", "unsound-mir-opts"]
 
 [unstable]
 build-std = ["std", "panic_abort"]
@@ -10,14 +11,18 @@ rustflags = ["-C", "target-feature=+avx2"]
 [target.'cfg(feature = "simd", target_arch = "aarch64")']
 rustflags = ["-C", "target-feature=+neon"]
 
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-L", "native=/usr/lib"]
+
 [target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-musl-ld"
+rustflags = ["-L", "native=/aarch64-linux-musl-cross/aarch64-linux-musl/lib", "-L", "native=/aarch64-linux-musl-cross/lib/gcc/aarch64-linux-musl/10.2.1/", "-l", "static=gcc"]
+linker = "aarch64-linux-musl-gcc"
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 
 [target.armv7-unknown-linux-musleabihf]
-linker = "armv7l-linux-musleabihf-ld"
+linker = "armv7l-linux-musleabihf-gcc"
 
 [target.armv7-unknown-linux-gnueabihf]
 linker = "arm-linux-gnueabihf-gcc"

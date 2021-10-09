@@ -18,6 +18,7 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 use leaky_bucket_lite::LeakyBucket;
+use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use log::{debug, error, info};
 use parking_lot::Mutex;
 use tokio::{
@@ -28,7 +29,7 @@ use tokio::{
 use tokio_tungstenite::{
     accept_hdr_async_with_config,
     tungstenite::{
-        handshake::server::{Request, Response},
+        handshake::server::{ErrorResponse, Request, Response},
         protocol::WebSocketConfig,
         Error, Message,
     },
@@ -493,11 +494,32 @@ async fn handle_connection(
     addr: SocketAddr,
     global_state: GlobalStateRef,
 ) -> Result<(), Error> {
-    let ip = addr.ip();
+    let mut ip = addr.ip();
 
-    info!("Incoming connection from {:?}", ip);
     let mut is_admin = false;
     let auth_callback = |req: &Request, res: Response| {
+        // Get the client IP if behind a HTTP proxy
+        if CONFIG.behind_proxy {
+            if let Some(header) = req.headers().get("X-Forwarded-For") {
+                if let Ok(value) = header.to_str() {
+                    if let Some(client_ip_str) = value.split(',').next() {
+                        if let Ok(client_ip) = client_ip_str.trim().parse() {
+                            ip = client_ip;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Incoming connection from {:?}", ip);
+
+        if !global_state.client_connected(&ip) {
+            debug!("Connection limit exceeded by IP {}, disconnecting", ip);
+            return Err(ErrorResponse::new(Some(String::from(
+                "Connection limit exceeded",
+            ))));
+        };
+
         let auth = req.headers().get("Authorization");
         if let (Some(header), Some(hash)) = (auth, CONFIG.admin_password_hash.as_ref()) {
             let hasher = Argon2::default();
@@ -510,11 +532,6 @@ async fn handle_connection(
             }
         }
         Ok(res)
-    };
-
-    if !global_state.client_connected(&ip) {
-        debug!("Connection limit exceeded by IP {}, disconnecting", ip);
-        return Ok(());
     };
 
     let ws_stream = accept_hdr_async_with_config(
@@ -534,8 +551,19 @@ async fn handle_connection(
     Ok(())
 }
 
+pub extern "C" fn handler(_: c_int) {
+    std::process::exit(0);
+}
+
+unsafe fn set_os_handlers() {
+    signal(SIGINT, handler as extern "C" fn(_) as sighandler_t);
+    signal(SIGTERM, handler as extern "C" fn(_) as sighandler_t);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), IoError> {
+    unsafe { set_os_handlers() };
+
     if var("RUST_LOG").is_err() {
         set_var("RUST_LOG", "info");
     }
@@ -552,14 +580,11 @@ async fn main() -> Result<(), IoError> {
         global_state.rooms.insert(room);
     }
 
-    let try_socket = TcpListener::bind(&addr).await;
-
-    let listener = match try_socket {
-        Ok(listener) => listener,
-        Err(_) => {
-            error!("Failed to bind to {}", addr);
-            return Ok(());
-        }
+    let listener = if let Ok(listener) = TcpListener::bind(&addr).await {
+        listener
+    } else {
+        error!("Failed to bind to {}", addr);
+        return Ok(());
     };
 
     info!("Listening on: {}", addr);

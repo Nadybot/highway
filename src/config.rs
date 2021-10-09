@@ -29,6 +29,8 @@ pub struct Config {
     pub admin_password_hash: Option<String>,
     #[serde(default)]
     pub public_channels: Vec<PublicChannel>,
+    #[serde(default = "default_behind_proxy")]
+    pub behind_proxy: bool,
 }
 
 const fn default_port() -> u16 {
@@ -53,6 +55,10 @@ const fn default_max_message_size() -> usize {
 
 const fn default_max_frame_size() -> usize {
     1_048_576
+}
+
+const fn default_behind_proxy() -> bool {
+    false
 }
 
 pub fn try_load() -> Result<Config, Error> {

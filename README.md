@@ -32,7 +32,8 @@ highway runs with sensible defaults, to override them, create a file called `con
     {
       "name": "update_notifications"
     }
-  ]
+  ],
+  "behind_proxy": true
 }
 ```
 
@@ -43,6 +44,7 @@ highway runs with sensible defaults, to override them, create a file called `con
 - `bytes_per_10_sec` sets how many bytes a client may send per 10 seconds (defaults to 5MB)
 - `admin_password_hash` is an argon2id hash used for gaining admin access with the `Authorization` header. This can be generated with `echo -n "password" | argon2 myhash -id`
 - `public_channels` is an array of special-named channels that can optionally be read only, i.e. only admins can send messages
+- `behind_proxy` will enable client IP parsing from the `X-Forwarded-For` header which is used in software like nginx
 
 ## Connecting
 
