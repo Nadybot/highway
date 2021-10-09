@@ -553,12 +553,22 @@ async fn main() -> Result<(), IoError> {
     }
 
     let try_socket = TcpListener::bind(&addr).await;
-    let listener = try_socket.expect("Failed to bind");
+
+    let listener = match try_socket {
+        Ok(listener) => listener,
+        Err(_) => {
+            error!("Failed to bind to {}", addr);
+            return Ok(());
+        }
+    };
+
     info!("Listening on: {}", addr);
 
     while let Ok((stream, addr)) = listener.accept().await {
         tokio::spawn(handle_connection(stream, addr, global_state.clone()));
     }
+
+    error!("Failed to establish TCP connection in accept");
 
     Ok(())
 }
