@@ -298,7 +298,7 @@ impl Peer {
     }
 
     /// Handle incoming websocket byte or text data.
-    fn on_message(&self, mut data: Vec<u8>) {
+    fn on_message(&self, mut data: Vec<u8>) -> bool {
         match from_slice::<model::Payload>(&mut data) {
             Ok(mut payload) => match payload {
                 model::Payload::Message(ref mut msg) => {
@@ -311,6 +311,9 @@ impl Peer {
                 model::Payload::Leave(leave_payload) => {
                     self.leave(&leave_payload.room);
                 }
+                model::Payload::Quit => {
+                    return true;
+                }
             },
             Err(e) => {
                 debug!("Error in JSON: {:?}", e);
@@ -319,6 +322,8 @@ impl Peer {
                     .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
             }
         }
+
+        false
     }
 
     /// Write all packets to the websocket stream.
@@ -360,7 +365,11 @@ impl Peer {
                         let _ = self.size_ratelimiter.acquire(payload.len() as f64).await;
                     }
 
-                    self.on_message(payload);
+                    let should_quit = self.on_message(payload);
+
+                    if should_quit {
+                        break;
+                    }
                 }
                 Message::Pong(_) => {}
             }

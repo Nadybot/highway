@@ -25,4 +25,6 @@ pub enum Payload {
     Join(JoinOrLeavePayload),
     #[serde(rename = "leave")]
     Leave(JoinOrLeavePayload),
+    #[serde(rename = "quit")]
+    Quit,
 }
