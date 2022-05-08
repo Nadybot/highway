@@ -12,39 +12,52 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
+use base64::encode;
 use dashmap::{DashMap, DashSet};
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use hyper::{
+    header::{
+        HeaderValue, AUTHORIZATION, CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
+        SEC_WEBSOCKET_VERSION, UPGRADE, USER_AGENT,
+    },
+    server::conn::AddrStream,
+    service::{make_service_fn, service_fn},
+    Body, Error as HyperError, Method, Request, Response, Server, StatusCode,
+};
 use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
-use log::{debug, error, info};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
+use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::{TcpListener, TcpStream},
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::timeout,
 };
 use tokio_tungstenite::{
-    accept_hdr_async_with_config,
     tungstenite::{
-        handshake::server::{ErrorResponse, Request, Response},
-        protocol::WebSocketConfig,
-        Error, Message,
+        protocol::{Role, WebSocketConfig},
+        Message,
     },
     WebSocketStream,
 };
+use tracing::{debug, error, info};
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 use std::{
     borrow::Borrow,
     collections::HashMap,
-    env::{set_var, var},
+    env::var,
     hash::{Hash, Hasher},
     io::Error as IoError,
     net::{IpAddr, SocketAddr},
+    str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 mod config;
@@ -72,7 +85,7 @@ struct GlobalState {
 
 impl GlobalState {
     /// Increases the connection counter for the IP address and returns false if limit is exceeded, else true.
-    fn client_connected(&self, ip: &IpAddr) -> bool {
+    fn client_connected(&self, ip: &IpAddr, agent: Option<String>) -> bool {
         let mut connections = self.connections.lock();
         if let Some(mut entry) = connections.get_mut(ip) {
             if entry.connection_count + 1 > CONFIG.connections_per_ip {
@@ -89,18 +102,31 @@ impl GlobalState {
                     size_ratelimiter: Arc::new(get_size_ratelimiter()),
                 },
             );
+        };
+
+        metrics::increment_counter!("highway_total_connections", "ip" => ip.to_string());
+        metrics::increment_gauge!("highway_current_connections", 1.0, "ip" => ip.to_string());
+
+        if let Some(agent) = agent {
+            metrics::increment_gauge!("highway_user_agents", 1.0, "agent" => agent);
         }
 
         true
     }
 
     /// Decreases the connection counter for the IP address.
-    fn client_disconnected(&self, ip: &IpAddr) {
+    fn client_disconnected(&self, ip: &IpAddr, agent: Option<String>) {
         let mut connections = self.connections.lock();
         let mut entry = connections
             .get_mut(ip)
             .expect("Must have been connected previously");
         entry.connection_count -= 1;
+
+        metrics::decrement_gauge!("highway_current_connections", 1.0, "ip" => ip.to_string());
+
+        if let Some(agent) = agent {
+            metrics::decrement_gauge!("highway_user_agents", 1.0, "agent" => agent);
+        }
 
         if entry.connection_count == 0 {
             debug!("Client {} disconnected last connection, removing data", ip);
@@ -117,6 +143,8 @@ struct Peer {
     is_admin: bool,
     /// The peer's IP address.
     ip: IpAddr,
+    /// The peer's user agent.
+    agent: Option<String>,
     /// A list of rooms this client is connected to.
     rooms: DashSet<Room>,
     /// Size ratelimiter.
@@ -134,6 +162,7 @@ impl Peer {
     fn start_from_stream<S: 'static + AsyncRead + AsyncWrite + Unpin + Send>(
         global_state: GlobalStateRef,
         ip: IpAddr,
+        agent: Option<String>,
         stream: WebSocketStream<S>,
         is_admin: bool,
     ) {
@@ -158,6 +187,7 @@ impl Peer {
             id,
             is_admin,
             ip,
+            agent,
             rooms: DashSet::new(),
             size_ratelimiter,
             freq_ratelimiter,
@@ -332,12 +362,27 @@ impl Peer {
         mut sink: SplitSink<WebSocketStream<S>, Message>,
         mut receiver: UnboundedReceiver<Message>,
     ) {
-        while let Some(msg) = receiver.recv().await {
-            debug!("{} <- {:?}", ip, msg);
+        loop {
+            match timeout(Duration::from_secs(45), receiver.recv()).await {
+                Ok(Some(msg)) => {
+                    debug!("{} <- {:?}", ip, msg);
 
-            if sink.send(msg).await.is_err() {
-                error!("Failed to send message to websocket sink");
-                break;
+                    if sink.send(msg).await.is_err() {
+                        error!("Failed to send message to websocket sink");
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    let msg = Message::Ping(Vec::new());
+
+                    debug!("{} <- {:?}", ip, msg);
+
+                    if sink.send(msg).await.is_err() {
+                        error!("Failed to send message to websocket sink");
+                        break;
+                    }
+                }
             }
         }
 
@@ -349,29 +394,38 @@ impl Peer {
         &self,
         mut stream: SplitStream<WebSocketStream<S>>,
     ) {
-        while let Some(Ok(msg)) = stream.next().await {
-            debug!("{} -> {:?}", self.ip, msg);
+        loop {
+            match timeout(Duration::from_secs(60), stream.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    debug!("{} -> {:?}", self.ip, msg);
 
-            match msg {
-                Message::Ping(payload) => {
-                    let _res = self.sender.send(Message::Pong(payload));
-                }
-                Message::Close(_) => break,
-                Message::Binary(_) | Message::Text(_) => {
-                    let payload = msg.into_data();
+                    match msg {
+                        Message::Ping(payload) => {
+                            let _res = self.sender.send(Message::Pong(payload));
+                        }
+                        Message::Close(_) => break,
+                        Message::Binary(_) | Message::Text(_) => {
+                            let payload = msg.into_data();
 
-                    if !self.is_admin {
-                        let _ = self.freq_ratelimiter.acquire_one().await;
-                        let _ = self.size_ratelimiter.acquire(payload.len() as f64).await;
+                            if !self.is_admin {
+                                let _ = self.freq_ratelimiter.acquire_one().await;
+                                let _ = self.size_ratelimiter.acquire(payload.len() as u32).await;
+                            }
+
+                            let should_quit = self.on_message(payload);
+
+                            if should_quit {
+                                break;
+                            }
+                        }
+                        Message::Pong(_) | Message::Frame(_) => {}
                     }
-
-                    let should_quit = self.on_message(payload);
-
-                    if should_quit {
-                        break;
-                    }
                 }
-                Message::Pong(_) => {}
+                Err(_) => {
+                    debug!("Did not receive payload from client within 60s, disconnecting");
+                    break;
+                }
+                _ => break,
             }
         }
 
@@ -383,7 +437,8 @@ impl Peer {
 
         self.rooms.clear();
 
-        self.global_state.client_disconnected(&self.ip);
+        self.global_state
+            .client_disconnected(&self.ip, self.agent.clone());
     }
 }
 
@@ -435,6 +490,14 @@ impl Room {
 
     /// Broadcast a message to all members, optionally providing a peer ID who sent this message.
     fn broadcast(&self, msg: &Message, sender: Option<&str>) {
+        if sender.is_some() {
+            metrics::increment_counter!("highway_messages_received");
+            metrics::counter!(
+                "highway_messages_sent",
+                (self.inner.senders.len() - 1) as u64
+            );
+        }
+
         for send_handle in self.inner.senders.iter() {
             if !sender.contains(send_handle.key()) {
                 let _res = send_handle.send(msg.clone());
@@ -460,6 +523,8 @@ impl Room {
         self.inner
             .senders
             .insert(peer.id.clone(), peer.sender.clone());
+
+        metrics::gauge!("highway_room_connections", self.inner.senders.len() as f64, "room" => self.inner.name.clone());
     }
 
     /// Unsubscribe a peer from this room.
@@ -472,6 +537,8 @@ impl Room {
             debug!("Deleting room {}", self.inner.name);
             peer.global_state.rooms.remove(self.inner.name.as_str());
         }
+
+        metrics::gauge!("highway_room_connections", self.inner.senders.len() as f64, "room" => self.inner.name.clone());
     }
 }
 
@@ -497,67 +564,149 @@ impl Borrow<str> for Room {
 
 type GlobalStateRef = Arc<GlobalState>;
 
-/// Handle a TCP connection and perform a websocket handshake.
-async fn handle_connection(
-    raw_stream: TcpStream,
+async fn websocket_endpoint_handler(
     addr: SocketAddr,
+    mut req: Request<Body>,
     global_state: GlobalStateRef,
-) -> Result<(), Error> {
-    let mut ip = addr.ip();
+) -> Result<Response<Body>, HyperError> {
+    let mut res = Response::new(Body::empty());
 
+    let mut ip = addr.ip();
     let mut is_admin = false;
-    let auth_callback = |req: &Request, res: Response| {
-        // Get the client IP if behind a HTTP proxy
-        if CONFIG.behind_proxy {
-            if let Some(header) = req.headers().get("X-Forwarded-For") {
-                if let Ok(value) = header.to_str() {
-                    if let Some(client_ip_str) = value.split(',').next() {
-                        if let Ok(client_ip) = client_ip_str.trim().parse() {
-                            ip = client_ip;
-                        }
+
+    if CONFIG.behind_proxy {
+        if let Some(header) = req.headers().get("X-Forwarded-For") {
+            if let Ok(value) = header.to_str() {
+                if let Some(client_ip_str) = value.split(',').next() {
+                    if let Ok(client_ip) = client_ip_str.trim().parse() {
+                        ip = client_ip;
                     }
                 }
             }
         }
+    }
 
-        info!("Incoming connection from {:?}", ip);
+    info!("Incoming connection from {:?}", ip);
 
-        if !global_state.client_connected(&ip) {
-            debug!("Connection limit exceeded by IP {}, disconnecting", ip);
-            return Err(ErrorResponse::new(Some(String::from(
-                "Connection limit exceeded",
-            ))));
-        };
-
-        let auth = req.headers().get("Authorization");
-        if let (Some(header), Some(hash)) = (auth, CONFIG.admin_password_hash.as_ref()) {
-            let hasher = Argon2::default();
-            let parsed_hash = PasswordHash::new(hash).unwrap();
-            if hasher
-                .verify_password(header.as_bytes(), &parsed_hash)
-                .is_ok()
-            {
-                is_admin = true;
-            }
+    let auth = req.headers().get(AUTHORIZATION);
+    if let (Some(header), Some(hash)) = (auth, CONFIG.admin_password_hash.as_ref()) {
+        let hasher = Argon2::default();
+        let parsed_hash = PasswordHash::new(hash).unwrap();
+        if hasher
+            .verify_password(header.as_bytes(), &parsed_hash)
+            .is_ok()
+        {
+            is_admin = true;
         }
-        Ok(res)
+    }
+
+    if !req.headers().contains_key(UPGRADE) || !req.headers().contains_key(SEC_WEBSOCKET_KEY) {
+        *res.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(res);
+    }
+
+    let upgrade = req.headers().get(UPGRADE).unwrap();
+
+    if upgrade.to_str().unwrap() != "websocket" {
+        *res.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(res);
+    }
+
+    let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
+
+    let mut hasher = Sha1::new();
+    hasher.update(key);
+    hasher.update(constants::GUID);
+    let real_key = encode(hasher.finalize());
+
+    let agent = req
+        .headers()
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
+
+    if !global_state.client_connected(&ip, agent.clone()) {
+        debug!("Connection limit exceeded by IP {}, disconnecting", ip);
+        *res.status_mut() = StatusCode::FORBIDDEN;
+        return Ok(res);
     };
 
-    let ws_stream = accept_hdr_async_with_config(
-        raw_stream,
-        auth_callback,
-        Some(WebSocketConfig {
-            accept_unmasked_frames: false,
-            max_send_queue: None,
-            max_message_size: Some(CONFIG.max_message_size),
-            max_frame_size: Some(CONFIG.max_frame_size),
-        }),
-    )
-    .await?;
+    tokio::spawn(async move {
+        match hyper::upgrade::on(&mut req).await {
+            Ok(upgraded) => {
+                let ws_stream = WebSocketStream::from_raw_socket(
+                    upgraded,
+                    Role::Server,
+                    Some(WebSocketConfig {
+                        accept_unmasked_frames: false,
+                        max_send_queue: None,
+                        max_message_size: Some(CONFIG.max_message_size),
+                        max_frame_size: Some(CONFIG.max_frame_size),
+                    }),
+                )
+                .await;
 
-    Peer::start_from_stream(global_state, ip, ws_stream, is_admin);
+                Peer::start_from_stream(global_state, ip, agent, ws_stream, is_admin);
+            }
+            Err(e) => {
+                error!("Upgrade error: {}", e);
 
-    Ok(())
+                global_state.client_disconnected(&ip, agent);
+            }
+        }
+    });
+
+    *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    res.headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    res.headers_mut()
+        .insert(UPGRADE, HeaderValue::from_static("websocket"));
+    res.headers_mut().insert(
+        SEC_WEBSOCKET_ACCEPT,
+        HeaderValue::from_str(&real_key).unwrap(),
+    );
+    res.headers_mut()
+        .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
+
+    Ok(res)
+}
+
+async fn http_handler(
+    addr: SocketAddr,
+    req: Request<Body>,
+    global_state: GlobalStateRef,
+    metrics_handle: Arc<PrometheusHandle>,
+) -> Result<Response<Body>, HyperError> {
+    debug!("{} request to {}", req.method(), req.uri().path());
+
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/") => websocket_endpoint_handler(addr, req, global_state).await,
+        (&Method::GET, "/metrics") => {
+            if let Some(auth_required) = &CONFIG.metrics_token {
+                if let Some(auth) = req.headers().get(AUTHORIZATION) {
+                    if auth != auth_required {
+                        return Ok(Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::empty())
+                            .unwrap());
+                    }
+                } else {
+                    return Ok(Response::builder()
+                        .status(StatusCode::FORBIDDEN)
+                        .body(Body::empty())
+                        .unwrap());
+                }
+            }
+
+            Ok(Response::builder()
+                .body(Body::from(metrics_handle.render()))
+                .unwrap())
+        }
+        _ => Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap()),
+    }
 }
 
 pub extern "C" fn handler(_: c_int) {
@@ -573,10 +722,18 @@ unsafe fn set_os_handlers() {
 async fn main() -> Result<(), IoError> {
     unsafe { set_os_handlers() };
 
-    if var("RUST_LOG").is_err() {
-        set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    let log_level = var("RUST_LOG").unwrap_or_else(|_| String::from("info"));
+    let level_filter = LevelFilter::from_str(&log_level).unwrap_or(LevelFilter::INFO);
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(level_filter)
+        .init();
+
+    // Set up metrics collection
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let metrics_handle = Arc::new(recorder.handle());
+    metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
 
     let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
     let global_state = Arc::new(GlobalState {
@@ -589,20 +746,30 @@ async fn main() -> Result<(), IoError> {
         global_state.rooms.insert(room);
     }
 
-    let listener = if let Ok(listener) = TcpListener::bind(&addr).await {
-        listener
-    } else {
-        error!("Failed to bind to {}", addr);
-        return Ok(());
-    };
+    let make_service = make_service_fn(move |addr: &AddrStream| {
+        let remote_addr = addr.remote_addr();
+        let global_state = global_state.clone();
+        let metrics_handle = metrics_handle.clone();
+
+        async move {
+            Ok::<_, HyperError>(service_fn(move |req: Request<Body>| {
+                http_handler(
+                    remote_addr,
+                    req,
+                    global_state.clone(),
+                    metrics_handle.clone(),
+                )
+            }))
+        }
+    });
+
+    let server = Server::bind(&addr).serve(make_service);
 
     info!("Listening on: {}", addr);
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, addr, global_state.clone()));
+    if let Err(why) = server.await {
+        error!("Fatal server error: {}", why);
     }
-
-    error!("Failed to establish TCP connection in accept");
 
     Ok(())
 }

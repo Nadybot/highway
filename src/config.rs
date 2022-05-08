@@ -1,6 +1,6 @@
 use crate::json::Error;
-use log::error;
 use serde::Deserialize;
+use tracing::error;
 
 use std::{fs::read_to_string, lazy::SyncLazy, path::Path, process::exit};
 
@@ -18,9 +18,9 @@ pub struct Config {
     #[serde(default = "default_connections_per_ip")]
     pub connections_per_ip: usize,
     #[serde(default = "default_msg_per_sec")]
-    pub msg_per_sec: usize,
+    pub msg_per_sec: u32,
     #[serde(default = "default_bytes_per_10_sec")]
-    pub bytes_per_10_sec: usize,
+    pub bytes_per_10_sec: u32,
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
     #[serde(default = "default_max_frame_size")]
@@ -31,6 +31,8 @@ pub struct Config {
     pub public_channels: Vec<PublicChannel>,
     #[serde(default = "default_behind_proxy")]
     pub behind_proxy: bool,
+    #[serde(default)]
+    pub metrics_token: Option<String>,
 }
 
 const fn default_port() -> u16 {
@@ -41,11 +43,11 @@ const fn default_connections_per_ip() -> usize {
     50
 }
 
-const fn default_msg_per_sec() -> usize {
+const fn default_msg_per_sec() -> u32 {
     10
 }
 
-const fn default_bytes_per_10_sec() -> usize {
+const fn default_bytes_per_10_sec() -> u32 {
     5_242_880
 }
 

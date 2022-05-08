@@ -6,21 +6,26 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-tokio-tungstenite = { version = "0.16", default-features = false, features = ["connect"] }
-dashmap = "5.0"
-env_logger = { version = "0.9", default-features = false, features = [
-    "termcolor",
-    "atty",
-    "humantime"
+argon2 = { version = "0.4", default-features = false, features = [
+    "password-hash",
+    "alloc"
 ] }
-leaky-bucket-lite = "0.3"
+base64 = "0.13"
+dashmap = { version = "5.1", default-features = false }
+hyper = { version = "0.14", default-features = false, features = [
+    "server",
+    "http1",
+    "tcp"
+] }
+leaky-bucket-lite = { version = "0.5", default-features = false, features = ["tokio", "parking_lot"] }
 libc = { version = "0.2", default-features = false }
-log = "0.4"
-parking_lot = { version = "0.11", features = ["nightly"] }
+metrics = { version = "0.18", default-features = false }
+metrics-exporter-prometheus = { version = "0.9", default-features = false }
+parking_lot = { version = "0.12", features = ["nightly", "hardware-lock-elision"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
+sha-1 = "0.10"
 simd-json = { version = "0.4", default-features = false, features = [
-    "allow-non-simd",
     "known-key",
     "serde_impl"
 ], optional = true }
@@ -29,8 +34,16 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
     "parking_lot"
 ] }
-argon2 = { version = "0.3", default-features = false, features = ["password-hash", "alloc"] }
-uuid = { version = "0.8", default-features = false, features = ["v4"] }
+tokio-tungstenite = { version = "0.17", default-features = false, features = [
+    "connect"
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "parking_lot",
+    "std"
+] }
+uuid = { version = "1.0", default-features = false, features = ["v4"] }
 futures-util = { version = "0.3", default-features = false }
 
 [features]

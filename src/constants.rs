@@ -3,6 +3,8 @@ use crate::config::CONFIG;
 use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
 
+pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
 pub const INVALID_ROOM_MSG: &str = "{\"type\": \"error\", \"message\": \"You attempted to interact with an invalid room, either because you are subscribed and trying to subscribe again or because you are not subscribed and unsubscribing or sending a message\"}";
 pub const ROOM_NAME_TOO_SHORT: &str =
     "{\"type\": \"error\", \"message\": \"The room name provided is shorter than 32 characters\"}";
@@ -19,18 +21,18 @@ pub const fn is_valid_room(room: &str) -> bool {
 
 pub fn get_freq_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
-        .max(CONFIG.msg_per_sec as f64)
-        .tokens(CONFIG.msg_per_sec as f64)
+        .max(CONFIG.msg_per_sec)
+        .tokens(CONFIG.msg_per_sec)
         .refill_interval(Duration::from_secs(1))
-        .refill_amount(CONFIG.msg_per_sec as f64)
+        .refill_amount(CONFIG.msg_per_sec)
         .build()
 }
 
 pub fn get_size_ratelimiter() -> LeakyBucket {
     LeakyBucket::builder()
-        .max(CONFIG.bytes_per_10_sec as f64)
-        .tokens(CONFIG.bytes_per_10_sec as f64)
+        .max(CONFIG.bytes_per_10_sec)
+        .tokens(CONFIG.bytes_per_10_sec)
         .refill_interval(Duration::from_secs(10))
-        .refill_amount(CONFIG.bytes_per_10_sec as f64)
+        .refill_amount(CONFIG.bytes_per_10_sec)
         .build()
 }
