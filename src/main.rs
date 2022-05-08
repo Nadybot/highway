@@ -362,27 +362,12 @@ impl Peer {
         mut sink: SplitSink<WebSocketStream<S>, Message>,
         mut receiver: UnboundedReceiver<Message>,
     ) {
-        loop {
-            match timeout(Duration::from_secs(45), receiver.recv()).await {
-                Ok(Some(msg)) => {
-                    debug!("{} <- {:?}", ip, msg);
+        while let Some(msg) = receiver.recv().await {
+            debug!("{} <- {:?}", ip, msg);
 
-                    if sink.send(msg).await.is_err() {
-                        error!("Failed to send message to websocket sink");
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    let msg = Message::Ping(Vec::new());
-
-                    debug!("{} <- {:?}", ip, msg);
-
-                    if sink.send(msg).await.is_err() {
-                        error!("Failed to send message to websocket sink");
-                        break;
-                    }
-                }
+            if sink.send(msg).await.is_err() {
+                error!("Failed to send message to websocket sink");
+                break;
             }
         }
 
@@ -394,10 +379,20 @@ impl Peer {
         &self,
         mut stream: SplitStream<WebSocketStream<S>>,
     ) {
+        let mut awaiting_pong = false;
+
         loop {
-            match timeout(Duration::from_secs(60), stream.next()).await {
+            let max_wait = if awaiting_pong {
+                Duration::from_secs(15)
+            } else {
+                Duration::from_secs(45)
+            };
+
+            match timeout(max_wait, stream.next()).await {
                 Ok(Some(Ok(msg))) => {
                     debug!("{} -> {:?}", self.ip, msg);
+
+                    awaiting_pong = false;
 
                     match msg {
                         Message::Ping(payload) => {
@@ -422,8 +417,14 @@ impl Peer {
                     }
                 }
                 Err(_) => {
-                    debug!("Did not receive payload from client within 60s, disconnecting");
-                    break;
+                    if awaiting_pong {
+                        debug!("Did not receive payload from client within 60s, disconnecting");
+                        break;
+                    } else {
+                        awaiting_pong = true;
+                        let msg = Message::Ping(Vec::new());
+                        let _res = self.sender.send(msg);
+                    }
                 }
                 _ => break,
             }
