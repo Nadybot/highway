@@ -85,7 +85,7 @@ jobs:
         run: |
           sudo apt install llvm clang -y
           mkdir freebsd_sysroot
-          curl -s https://download.freebsd.org/ftp/releases/amd64/12.2-RELEASE/base.txz \
+          curl -s https://download.freebsd.org/ftp/releases/amd64/13.0-RELEASE/base.txz \
               | tar -xJf - -C freebsd_sysroot ./lib ./usr/lib ./usr/libdata ./usr/include ./usr/share/keys ./etc
 
       - name: Set up Rust for FreeBSD x86_64
