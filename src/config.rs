@@ -2,7 +2,7 @@ use crate::json::Error;
 use serde::Deserialize;
 use tracing::error;
 
-use std::{fs::read_to_string, lazy::SyncLazy, path::Path, process::exit};
+use std::{fs::read_to_string, path::Path, process::exit, sync::LazyLock};
 
 #[derive(Deserialize, Debug)]
 pub struct PublicChannel {
@@ -78,7 +78,7 @@ pub fn try_load() -> Result<Config, Error> {
     }
 }
 
-pub static CONFIG: SyncLazy<Config> = SyncLazy::new(|| {
+pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     try_load().unwrap_or_else(|e| {
         error!("Configuration Error: {}", e);
         exit(1)
