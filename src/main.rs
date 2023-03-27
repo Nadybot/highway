@@ -12,7 +12,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
-use base64::encode;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use dashmap::{DashMap, DashSet};
 use futures_util::{
     stream::{SplitSink, SplitStream},
@@ -618,7 +618,7 @@ async fn websocket_endpoint_handler(
     let mut hasher = Sha1::new();
     hasher.update(key);
     hasher.update(constants::GUID);
-    let real_key = encode(hasher.finalize());
+    let real_key = STANDARD.encode(hasher.finalize());
 
     let agent = req
         .headers()
