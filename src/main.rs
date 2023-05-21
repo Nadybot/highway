@@ -1,5 +1,4 @@
-#![feature(once_cell)]
-#![feature(option_result_contains)]
+#![feature(lazy_cell)]
 #![deny(clippy::pedantic)]
 #![allow(clippy::cast_precision_loss)]
 use crate::{
@@ -87,7 +86,7 @@ impl GlobalState {
     /// Increases the connection counter for the IP address and returns false if limit is exceeded, else true.
     fn client_connected(&self, ip: &IpAddr, agent: Option<String>) -> bool {
         let mut connections = self.connections.lock();
-        if let Some(mut entry) = connections.get_mut(ip) {
+        if let Some(entry) = connections.get_mut(ip) {
             if entry.connection_count + 1 > CONFIG.connections_per_ip {
                 return false;
             }
@@ -117,7 +116,7 @@ impl GlobalState {
     /// Decreases the connection counter for the IP address.
     fn client_disconnected(&self, ip: &IpAddr, agent: Option<String>) {
         let mut connections = self.connections.lock();
-        let mut entry = connections
+        let entry = connections
             .get_mut(ip)
             .expect("Must have been connected previously");
         entry.connection_count -= 1;
@@ -500,7 +499,7 @@ impl Room {
         }
 
         for send_handle in self.inner.senders.iter() {
-            if !sender.contains(send_handle.key()) {
+            if sender != Some(send_handle.key()) {
                 let _res = send_handle.send(msg.clone());
             }
         }

@@ -22,8 +22,8 @@ leaky-bucket-lite = { version = "0.5", default-features = false, features = [
     "parking_lot"
 ] }
 libc = { version = "0.2", default-features = false }
-metrics = { version = "0.20", default-features = false }
-metrics-exporter-prometheus = { version = "0.11", default-features = false }
+metrics = { version = "0.21", default-features = false }
+metrics-exporter-prometheus = { version = "0.12", default-features = false }
 parking_lot = { version = "0.12", features = [
     "nightly",
     "hardware-lock-elision"
@@ -34,7 +34,7 @@ serde_json = { version = "1.0", features = [
     "float_roundtrip"
 ], optional = true }
 sha-1 = "0.10"
-simd-json = { version = "0.7", default-features = false, features = [
+simd-json = { version = "0.9", default-features = false, features = [
     "allow-non-simd",
     "known-key",
     "serde_impl"
@@ -44,7 +44,7 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
     "parking_lot"
 ] }
-tokio-tungstenite = { version = "0.18", default-features = false, features = [
+tokio-tungstenite = { version = "0.19", default-features = false, features = [
     "connect"
 ] }
 tracing = "0.1"
@@ -60,6 +60,9 @@ futures-util = { version = "0.3", default-features = false }
 default = ["no-simd"]
 no-simd = ["serde_json"]
 simd = ["simd-json"]
+
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 codegen-units = 1
