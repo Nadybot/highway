@@ -29,13 +29,13 @@ jobs:
 
       - name: Build for x86_64
         run: |
-          cargo build --release --target=x86_64-unknown-linux-gnu --features simd
+          cargo build --release --target=x86_64-unknown-linux-gnu
           strip target/x86_64-unknown-linux-gnu/release/highway
           cp target/x86_64-unknown-linux-gnu/release/highway highway-linux-x86_64
 
       - name: Build for aarch64
         run: |
-          cargo build --release --target=aarch64-unknown-linux-gnu --features simd
+          cargo build --release --target=aarch64-unknown-linux-gnu
           aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/highway
           cp target/aarch64-unknown-linux-gnu/release/highway highway-linux-aarch64
 
@@ -76,7 +76,7 @@ jobs:
 
       - name: Build for FreeBSD x86_64
         run: |
-          cargo build --release --target=x86_64-unknown-freebsd --features simd
+          cargo build --release --target=x86_64-unknown-freebsd
           strip target/x86_64-unknown-freebsd/release/highway
           cp target/x86_64-unknown-freebsd/release/highway highway-freebsd-x86_64
 
@@ -101,7 +101,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --target=x86_64-apple-darwin --features simd
+          cargo build --release --target=x86_64-apple-darwin
           strip target/x86_64-apple-darwin/release/highway
           cp target/x86_64-apple-darwin/release/highway highway-macos
 
@@ -126,7 +126,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --target=x86_64-pc-windows-msvc --features simd
+          cargo build --release --target=x86_64-pc-windows-msvc
           cp target/x86_64-pc-windows-msvc/release/highway.exe highway-windows.exe
 
       - name: Upload artifacts
