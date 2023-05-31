@@ -370,21 +370,21 @@ impl Peer {
                     let _res = self
                         .sender
                         .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
-                }
-
-                match payload.kind {
-                    model::PayloadKind::Message => {
-                        payload.user = &self.id;
-                        self.send_message(payload.room, &payload, data.len()).await;
-                    }
-                    model::PayloadKind::Join => {
-                        self.join(payload.room);
-                    }
-                    model::PayloadKind::Leave => {
-                        self.leave(payload.room);
-                    }
-                    model::PayloadKind::Quit => {
-                        return true;
+                } else {
+                    match payload.kind {
+                        model::PayloadKind::Message => {
+                            payload.user = &self.id;
+                            self.send_message(payload.room, &payload, data.len()).await;
+                        }
+                        model::PayloadKind::Join => {
+                            self.join(payload.room);
+                        }
+                        model::PayloadKind::Leave => {
+                            self.leave(payload.room);
+                        }
+                        model::PayloadKind::Quit => {
+                            return true;
+                        }
                     }
                 }
             }
