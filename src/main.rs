@@ -3,7 +3,6 @@
 #![allow(clippy::cast_precision_loss)]
 use std::{
     borrow::Borrow,
-    collections::HashMap,
     env::var,
     hash::{Hash, Hasher},
     io::Error as IoError,
@@ -35,7 +34,6 @@ use hyper::{
 use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use parking_lot::Mutex;
 use serde_json::{from_slice, to_string};
 use sha1::{Digest, Sha1};
 use tokio::{
@@ -78,22 +76,21 @@ struct GlobalState {
     /// All rooms currently existing in the server.
     rooms: DashSet<Room>,
     /// Current connection state from clients.
-    connections: Mutex<HashMap<IpAddr, ClientState>>,
+    connections: DashMap<IpAddr, ClientState>,
 }
 
 impl GlobalState {
     /// Increases the connection counter for the IP address and returns false if
     /// limit is exceeded, else true.
     fn client_connected(&self, ip: &IpAddr, agent: Option<String>) -> bool {
-        let mut connections = self.connections.lock();
-        if let Some(entry) = connections.get_mut(ip) {
+        if let Some(mut entry) = self.connections.get_mut(ip) {
             if entry.connection_count + 1 > CONFIG.connections_per_ip {
                 return false;
             }
 
             entry.connection_count += 1;
         } else {
-            connections.insert(
+            self.connections.insert(
                 *ip,
                 ClientState {
                     connection_count: 1,
@@ -115,8 +112,8 @@ impl GlobalState {
 
     /// Decreases the connection counter for the IP address.
     fn client_disconnected(&self, ip: &IpAddr, agent: Option<String>) {
-        let mut connections = self.connections.lock();
-        let entry = connections
+        let mut entry = self
+            .connections
             .get_mut(ip)
             .expect("Must have been connected previously");
         entry.connection_count -= 1;
@@ -129,7 +126,7 @@ impl GlobalState {
 
         if entry.connection_count == 0 {
             debug!("Client {} disconnected last connection, removing data", ip);
-            connections.remove(ip);
+            self.connections.remove(ip);
         }
     }
 }
@@ -174,8 +171,10 @@ impl Peer {
         let (sender, receiver) = unbounded_channel();
 
         let (freq_ratelimiter, size_ratelimiter) = {
-            let connections = global_state.connections.lock();
-            let client_state = connections.get(&ip).expect("client is connected already");
+            let client_state = global_state
+                .connections
+                .get(&ip)
+                .expect("client is connected already");
             (
                 client_state.freq_ratelimiter.clone(),
                 client_state.size_ratelimiter.clone(),
@@ -738,7 +737,7 @@ async fn main() -> Result<(), IoError> {
     let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
     let global_state = Arc::new(GlobalState {
         rooms: DashSet::new(),
-        connections: Mutex::new(HashMap::new()),
+        connections: DashMap::new(),
     });
 
     for room in &CONFIG.public_channels {
