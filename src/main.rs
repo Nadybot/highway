@@ -272,10 +272,30 @@ impl Peer {
     }
 
     #[inline]
-    fn room_info(&self, room_name: &str, read_only: bool, members: &[String]) {
-        let _res = self.sender.send(Message::Text(format!(
-            "{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"users\": {members:?}}}"
-        )));
+    fn room_info(
+        &self,
+        room_name: &str,
+        read_only: bool,
+        msg_per_sec: Option<u32>,
+        bytes_per_10_sec: Option<u32>,
+        members: &[String],
+    ) {
+        let text = match (msg_per_sec, bytes_per_10_sec) {
+            (Some(msg_per_sec), Some(bytes_per_10_sec)) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_per_sec\": {msg_per_sec}, \"bytes_per_10_sec\": {bytes_per_10_sec}, \"users\": {members:?}}}")
+            }
+            (Some(msg_per_sec), None) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_per_sec\": {msg_per_sec}, \"users\": {members:?}}}")
+            }
+            (None, Some(bytes_per_10_sec)) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"bytes_per_10_sec\": {bytes_per_10_sec}, \"users\": {members:?}}}")
+            }
+            (None, None) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"users\": {members:?}}}")
+            }
+        };
+
+        let _res = self.sender.send(Message::Text(text));
     }
 
     /// Leave a room.
@@ -320,7 +340,13 @@ impl Peer {
             self.rooms.insert(room.clone(), room_ratelimiters);
 
             self.successfully_joined_the_room();
-            self.room_info(room_name, room.inner.read_only, &subscribed);
+            self.room_info(
+                room_name,
+                room.inner.read_only,
+                room.inner.msg_per_sec,
+                room.inner.bytes_per_10_sec,
+                &subscribed,
+            );
         } else {
             debug!("Room {} does not exist, creating", room_name);
 
@@ -335,7 +361,7 @@ impl Peer {
             self.global_state.rooms.insert(room);
 
             self.successfully_joined_the_room();
-            self.room_info(room_name, false, &[]);
+            self.room_info(room_name, false, None, None, &[]);
         }
     }
 
