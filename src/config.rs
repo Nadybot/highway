@@ -8,6 +8,10 @@ pub struct PublicChannel {
     pub name: String,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub msg_per_sec: Option<u32>,
+    #[serde(default)]
+    pub bytes_per_10_sec: Option<u32>,
 }
 
 #[derive(Deserialize, Debug)]

@@ -12,7 +12,9 @@
             "read_only": true
         },
         {
-            "name": "update_notifications"
+            "name": "update_notifications",
+            "msg_per_sec": 1,
+            "bytes_per_10_sec": 9999999
         }
     ],
     "behind_proxy": true

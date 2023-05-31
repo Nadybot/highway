@@ -54,7 +54,10 @@ use uuid::Uuid;
 
 use crate::{
     config::CONFIG,
-    constants::{get_freq_ratelimiter, get_size_ratelimiter},
+    constants::{
+        get_freq_ratelimiter, get_global_freq_ratelimiter, get_global_size_ratelimiter,
+        get_size_ratelimiter,
+    },
 };
 
 mod config;
@@ -65,10 +68,8 @@ mod model;
 struct ClientState {
     /// Number of connections by this client.
     connection_count: usize,
-    /// Frequency ratelimiter.
-    freq_ratelimiter: Arc<LeakyBucket>,
-    /// Size ratelimiter.
-    size_ratelimiter: Arc<LeakyBucket>,
+    /// Global ratelimiters.
+    ratelimiters: Arc<Ratelimiters>,
 }
 
 /// Global state.
@@ -90,12 +91,16 @@ impl GlobalState {
 
             entry.connection_count += 1;
         } else {
+            let ratelimiters = Arc::new(Ratelimiters {
+                freq: Some(get_global_freq_ratelimiter()),
+                size: Some(get_global_size_ratelimiter()),
+            });
+
             self.connections.insert(
                 *ip,
                 ClientState {
                     connection_count: 1,
-                    freq_ratelimiter: Arc::new(get_freq_ratelimiter()),
-                    size_ratelimiter: Arc::new(get_size_ratelimiter()),
+                    ratelimiters,
                 },
             );
         };
@@ -131,6 +136,26 @@ impl GlobalState {
     }
 }
 
+/// Ratelimiters for a client's messages.
+struct Ratelimiters {
+    /// Size ratelimiter.
+    size: Option<LeakyBucket>,
+    /// Frequency ratelimiter.
+    freq: Option<LeakyBucket>,
+}
+
+impl Ratelimiters {
+    async fn send_message(&self, payload_size: usize) {
+        if let Some(freq) = self.freq.as_ref() {
+            let _ = freq.acquire_one().await;
+        }
+
+        if let Some(size) = self.size.as_ref() {
+            let _ = size.acquire(payload_size as u32).await;
+        }
+    }
+}
+
 /// A client connected to the server
 struct Peer {
     /// The peer's ID.
@@ -142,11 +167,9 @@ struct Peer {
     /// The peer's user agent.
     agent: Option<String>,
     /// A list of rooms this client is connected to.
-    rooms: DashSet<Room>,
-    /// Size ratelimiter.
-    size_ratelimiter: Arc<LeakyBucket>,
-    /// Frequency ratelimiter.
-    freq_ratelimiter: Arc<LeakyBucket>,
+    rooms: DashMap<Room, Ratelimiters>,
+    /// Ratelimiters for everything this client sends.
+    ratelimiters: Arc<Ratelimiters>,
     /// Handle to send data to the peer.
     sender: UnboundedSender<Message>,
     /// Global state.
@@ -170,15 +193,13 @@ impl Peer {
         // Create a channel to send messages from anywhere to the websocket.
         let (sender, receiver) = unbounded_channel();
 
-        let (freq_ratelimiter, size_ratelimiter) = {
+        let ratelimiters = {
             let client_state = global_state
                 .connections
                 .get(&ip)
                 .expect("client is connected already");
-            (
-                client_state.freq_ratelimiter.clone(),
-                client_state.size_ratelimiter.clone(),
-            )
+
+            client_state.ratelimiters.clone()
         };
 
         let peer = Arc::new(Self {
@@ -186,9 +207,8 @@ impl Peer {
             is_admin,
             ip,
             agent,
-            rooms: DashSet::new(),
-            size_ratelimiter,
-            freq_ratelimiter,
+            rooms: DashMap::new(),
+            ratelimiters,
             sender,
             global_state,
         });
@@ -260,7 +280,7 @@ impl Peer {
 
     /// Leave a room.
     fn leave(&self, room_name: &str) {
-        if let Some(room) = self.rooms.remove(room_name) {
+        if let Some((room, _)) = self.rooms.remove(room_name) {
             room.unsubscribe(self);
             debug!("{} unsubscribed from room {}", self.id, room_name);
             self.successfully_left_the_room();
@@ -290,18 +310,28 @@ impl Peer {
         if let Some(room) = maybe_room {
             debug!("Room {} exists, adding", room_name);
 
+            let room_ratelimiters = Ratelimiters {
+                freq: room.inner.msg_per_sec.map(|b| get_freq_ratelimiter(b)),
+                size: room.inner.bytes_per_10_sec.map(|b| get_size_ratelimiter(b)),
+            };
+
             let subscribed = room.subscribed();
             room.subscribe(self);
-            self.rooms.insert(room.clone());
+            self.rooms.insert(room.clone(), room_ratelimiters);
 
             self.successfully_joined_the_room();
             self.room_info(room_name, room.inner.read_only, &subscribed);
         } else {
             debug!("Room {} does not exist, creating", room_name);
 
-            let room = Room::new(room_name.to_string(), false);
+            let room_ratelimiters = Ratelimiters {
+                freq: None,
+                size: None,
+            };
+
+            let room = Room::new(room_name.to_string(), false, None, None);
             room.subscribe(self);
-            self.rooms.insert(room.clone());
+            self.rooms.insert(room.clone(), room_ratelimiters);
             self.global_state.rooms.insert(room);
 
             self.successfully_joined_the_room();
@@ -310,13 +340,20 @@ impl Peer {
     }
 
     /// Send a message in a room.
-    fn send_message(&self, room: &str, payload: &model::Payload) {
+    async fn send_message(&self, room: &str, payload: &model::Payload<'_>, data_size: usize) {
         let message = Message::Text(to_string(payload).expect("Will always be valid JSON"));
 
-        if let Some(room) = self.rooms.get(room) {
+        if let Some(entry) = self.rooms.get(room) {
+            let room = entry.key();
+
             if room.inner.read_only && !self.is_admin {
                 self.room_read_only();
             } else {
+                if !self.is_admin {
+                    let ratelimiters = entry.value();
+                    ratelimiters.send_message(data_size).await;
+                }
+
                 room.broadcast(&message, Some(&self.id));
             }
         } else {
@@ -325,7 +362,7 @@ impl Peer {
     }
 
     /// Handle incoming websocket byte or text data.
-    fn on_message(&self, data: &[u8]) -> bool {
+    async fn on_message(&self, data: &[u8]) -> bool {
         match from_slice::<model::Payload>(data) {
             Ok(mut payload) => {
                 if payload.is_invalid() {
@@ -338,7 +375,7 @@ impl Peer {
                 match payload.kind {
                     model::PayloadKind::Message => {
                         payload.user = &self.id;
-                        self.send_message(payload.room, &payload);
+                        self.send_message(payload.room, &payload, data.len()).await;
                     }
                     model::PayloadKind::Join => {
                         self.join(payload.room);
@@ -409,11 +446,10 @@ impl Peer {
                             let payload = msg.into_data();
 
                             if !self.is_admin {
-                                let _ = self.freq_ratelimiter.acquire_one().await;
-                                let _ = self.size_ratelimiter.acquire(payload.len() as u32).await;
+                                self.ratelimiters.send_message(payload.len()).await;
                             }
 
-                            let should_quit = self.on_message(&payload);
+                            let should_quit = self.on_message(&payload).await;
 
                             if should_quit {
                                 break;
@@ -438,7 +474,8 @@ impl Peer {
 
         info!("Client from {} disconnected", self.ip);
 
-        for room in self.rooms.iter() {
+        for entry in self.rooms.iter() {
+            let room = entry.key();
             room.unsubscribe(self);
         }
 
@@ -455,6 +492,10 @@ struct RoomInner {
     name: String,
     /// Whether or not this room is read-only.
     read_only: bool,
+    /// Amount of messages that can be sent per second.
+    msg_per_sec: Option<u32>,
+    /// Amount of bytes that can be sent in 10 seconds.
+    bytes_per_10_sec: Option<u32>,
     /// Subcribed peer senders.
     senders: DashMap<String, UnboundedSender<Message>>,
 }
@@ -467,11 +508,18 @@ struct Room {
 
 impl Room {
     /// Create a new room.
-    fn new(name: String, read_only: bool) -> Self {
+    fn new(
+        name: String,
+        read_only: bool,
+        msg_per_sec: Option<u32>,
+        bytes_per_10_sec: Option<u32>,
+    ) -> Self {
         Self {
             inner: Arc::new(RoomInner {
                 name,
                 read_only,
+                msg_per_sec,
+                bytes_per_10_sec,
                 senders: DashMap::new(),
             }),
         }
@@ -750,7 +798,12 @@ async fn main() -> Result<(), IoError> {
     });
 
     for room in &CONFIG.public_channels {
-        let room = Room::new(room.name.clone(), room.read_only);
+        let room = Room::new(
+            room.name.clone(),
+            room.read_only,
+            room.msg_per_sec,
+            room.bytes_per_10_sec,
+        );
         global_state.rooms.insert(room);
     }
 
