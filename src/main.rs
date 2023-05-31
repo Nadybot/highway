@@ -1,10 +1,16 @@
 #![feature(lazy_cell)]
 #![deny(clippy::pedantic)]
 #![allow(clippy::cast_precision_loss)]
-use crate::{
-    config::CONFIG,
-    constants::{get_freq_ratelimiter, get_size_ratelimiter},
-    json::{from_slice, to_string},
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    env::var,
+    hash::{Hash, Hasher},
+    io::Error as IoError,
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
 
 use argon2::{
@@ -30,6 +36,7 @@ use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
+use serde_json::{from_slice, to_string};
 use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -47,21 +54,13 @@ use tracing::{debug, error, info};
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
-use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    env::var,
-    hash::{Hash, Hasher},
-    io::Error as IoError,
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+use crate::{
+    config::CONFIG,
+    constants::{get_freq_ratelimiter, get_size_ratelimiter},
 };
 
 mod config;
 mod constants;
-mod json;
 mod model;
 
 /// A single IP's connection state.
@@ -83,7 +82,8 @@ struct GlobalState {
 }
 
 impl GlobalState {
-    /// Increases the connection counter for the IP address and returns false if limit is exceeded, else true.
+    /// Increases the connection counter for the IP address and returns false if
+    /// limit is exceeded, else true.
     fn client_connected(&self, ip: &IpAddr, agent: Option<String>) -> bool {
         let mut connections = self.connections.lock();
         if let Some(entry) = connections.get_mut(ip) {
@@ -255,8 +255,7 @@ impl Peer {
     #[inline]
     fn room_info(&self, room_name: &str, read_only: bool, members: &[String]) {
         let _res = self.sender.send(Message::Text(format!(
-            "{{\"type\": \"room-info\", \"room\": \"{}\", \"read-only\": {}, \"users\": {:?}}}",
-            room_name, read_only, members
+            "{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"users\": {members:?}}}"
         )));
     }
 
@@ -327,18 +326,18 @@ impl Peer {
     }
 
     /// Handle incoming websocket byte or text data.
-    fn on_message(&self, mut data: Vec<u8>) -> bool {
-        match from_slice::<model::Payload>(&mut data) {
+    fn on_message(&self, data: &[u8]) -> bool {
+        match from_slice::<model::Payload>(data) {
             Ok(mut payload) => match payload {
                 model::Payload::Message(ref mut msg) => {
-                    msg.user = self.id.clone();
-                    self.send_message(&msg.room.clone(), &payload);
+                    msg.user = &self.id;
+                    self.send_message(&msg.room, &payload);
                 }
                 model::Payload::Join(join_payload) => {
-                    self.join(&join_payload.room);
+                    self.join(join_payload.room);
                 }
                 model::Payload::Leave(leave_payload) => {
-                    self.leave(&leave_payload.room);
+                    self.leave(leave_payload.room);
                 }
                 model::Payload::Quit => {
                     return true;
@@ -406,7 +405,7 @@ impl Peer {
                                 let _ = self.size_ratelimiter.acquire(payload.len() as u32).await;
                             }
 
-                            let should_quit = self.on_message(payload);
+                            let should_quit = self.on_message(&payload);
 
                             if should_quit {
                                 break;
@@ -419,11 +418,11 @@ impl Peer {
                     if awaiting_pong {
                         debug!("Did not receive payload from client within 60s, disconnecting");
                         break;
-                    } else {
-                        awaiting_pong = true;
-                        let msg = Message::Ping(Vec::new());
-                        let _res = self.sender.send(msg);
                     }
+
+                    awaiting_pong = true;
+                    let msg = Message::Ping(Vec::new());
+                    let _res = self.sender.send(msg);
                 }
                 _ => break,
             }
@@ -488,7 +487,8 @@ impl Room {
         self.broadcast(&msg, None);
     }
 
-    /// Broadcast a message to all members, optionally providing a peer ID who sent this message.
+    /// Broadcast a message to all members, optionally providing a peer ID who
+    /// sent this message.
     fn broadcast(&self, msg: &Message, sender: Option<&str>) {
         if sender.is_some() {
             metrics::increment_counter!("highway_messages_received");

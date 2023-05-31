@@ -31,14 +31,10 @@ parking_lot = { version = "0.12", features = [
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = [
     "arbitrary_precision",
-    "float_roundtrip"
-], optional = true }
+    "float_roundtrip",
+    "raw_value"
+] }
 sha-1 = "0.10"
-simd-json = { version = "0.9", default-features = false, features = [
-    "allow-non-simd",
-    "known-key",
-    "serde_impl"
-], optional = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
@@ -55,11 +51,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
 futures-util = { version = "0.3", default-features = false }
-
-[features]
-default = ["no-simd"]
-no-simd = ["serde_json"]
-simd = ["simd-json"]
 
 [profile.dev]
 panic = "abort"

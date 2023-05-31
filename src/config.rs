@@ -1,8 +1,7 @@
-use crate::json::Error;
+use std::{fs::read_to_string, path::Path, process::exit, sync::LazyLock};
+
 use serde::Deserialize;
 use tracing::error;
-
-use std::{fs::read_to_string, path::Path, process::exit, sync::LazyLock};
 
 #[derive(Deserialize, Debug)]
 pub struct PublicChannel {
@@ -63,18 +62,17 @@ const fn default_behind_proxy() -> bool {
     false
 }
 
-pub fn try_load() -> Result<Config, Error> {
+pub fn try_load() -> Result<Config, serde_json::Error> {
     let file = std::env::args()
         .nth(1)
         .unwrap_or_else(|| String::from("config.json"));
     let path = Path::new(&file);
 
     if path.exists() {
-        let mut content = read_to_string(path).unwrap();
-        crate::json::from_str(&mut content)
+        let content = read_to_string(path).unwrap();
+        serde_json::from_str(&content)
     } else {
-        let mut content = String::from("{}");
-        crate::json::from_str(&mut content)
+        serde_json::from_str("{}")
     }
 }
 
