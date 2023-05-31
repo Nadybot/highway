@@ -327,21 +327,30 @@ impl Peer {
     /// Handle incoming websocket byte or text data.
     fn on_message(&self, data: &[u8]) -> bool {
         match from_slice::<model::Payload>(data) {
-            Ok(mut payload) => match payload {
-                model::Payload::Message(ref mut msg) => {
-                    msg.user = &self.id;
-                    self.send_message(&msg.room, &payload);
+            Ok(mut payload) => {
+                if payload.is_invalid() {
+                    debug!("Payload is invalid!");
+                    let _res = self
+                        .sender
+                        .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
                 }
-                model::Payload::Join(join_payload) => {
-                    self.join(join_payload.room);
+
+                match payload.kind {
+                    model::PayloadKind::Message => {
+                        payload.user = &self.id;
+                        self.send_message(payload.room, &payload);
+                    }
+                    model::PayloadKind::Join => {
+                        self.join(payload.room);
+                    }
+                    model::PayloadKind::Leave => {
+                        self.leave(payload.room);
+                    }
+                    model::PayloadKind::Quit => {
+                        return true;
+                    }
                 }
-                model::Payload::Leave(leave_payload) => {
-                    self.leave(leave_payload.room);
-                }
-                model::Payload::Quit => {
-                    return true;
-                }
-            },
+            }
             Err(e) => {
                 debug!("Error in JSON: {:?}", e);
                 let _res = self

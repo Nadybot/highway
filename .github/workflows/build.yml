@@ -19,6 +19,7 @@ jobs:
 
       - name: Install cross compilers
         run: |
+          sudo apt update
           sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf -y
 
       - name: Set up Rust

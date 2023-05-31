@@ -1,30 +1,34 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PayloadKind {
+    Message,
+    Join,
+    Leave,
+    Quit,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct Message<'a> {
+pub struct Payload<'a> {
+    #[serde(rename = "type")]
+    pub kind: PayloadKind,
+    #[serde(default, skip_serializing_if = "str::is_empty")]
     pub room: &'a str,
     #[serde(skip_deserializing)]
     pub user: &'a str,
-    #[serde(default, borrow)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<&'a RawValue>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct JoinOrLeavePayload<'a> {
-    #[serde(borrow)]
-    pub room: &'a str,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(tag = "type")]
-pub enum Payload<'a> {
-    #[serde(borrow, rename = "message")]
-    Message(Message<'a>),
-    #[serde(borrow, rename = "join")]
-    Join(JoinOrLeavePayload<'a>),
-    #[serde(borrow, rename = "leave")]
-    Leave(JoinOrLeavePayload<'a>),
-    #[serde(rename = "quit")]
-    Quit,
+impl<'a> Payload<'a> {
+    pub fn is_invalid(&self) -> bool {
+        match self.kind {
+            PayloadKind::Join => self.room.is_empty(),
+            PayloadKind::Leave => self.room.is_empty(),
+            PayloadKind::Message => self.room.is_empty() || self.body.is_none(),
+            PayloadKind::Quit => false,
+        }
+    }
 }
