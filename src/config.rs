@@ -1,4 +1,10 @@
-use std::{fs::read_to_string, path::Path, process::exit, sync::LazyLock};
+use std::{
+    fmt::{self, Write},
+    fs::read_to_string,
+    path::Path,
+    process::exit,
+    sync::LazyLock,
+};
 
 use serde::Deserialize;
 use tracing::error;
@@ -9,9 +15,9 @@ pub struct PublicChannel {
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
-    pub msg_per_sec: Option<u32>,
+    pub msg_freq_ratelimit: Option<Ratelimit>,
     #[serde(default)]
-    pub bytes_per_10_sec: Option<u32>,
+    pub msg_size_ratelimit: Option<Ratelimit>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -20,10 +26,10 @@ pub struct Config {
     pub port: u16,
     #[serde(default = "default_connections_per_ip")]
     pub connections_per_ip: usize,
-    #[serde(default = "default_msg_per_sec")]
-    pub msg_per_sec: u32,
-    #[serde(default = "default_bytes_per_10_sec")]
-    pub bytes_per_10_sec: u32,
+    #[serde(default = "default_msg_freq")]
+    pub msg_freq_ratelimit: Ratelimit,
+    #[serde(default = "default_msg_size")]
+    pub msg_size_ratelimit: Ratelimit,
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
     #[serde(default = "default_max_frame_size")]
@@ -38,6 +44,31 @@ pub struct Config {
     pub metrics_token: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct Ratelimit {
+    pub max_tokens: u32,
+    pub tokens: u32,
+    pub refill_amount: u32,
+    pub refill_secs: u64,
+}
+
+// Hacky workaround to save on the JSON serialization
+impl fmt::Display for Ratelimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("{\"max_tokens\": ")?;
+        self.max_tokens.fmt(f)?;
+        f.write_str(", \"tokens\": ")?;
+        self.tokens.fmt(f)?;
+        f.write_str(", \"refill_amount\": ")?;
+        self.refill_amount.fmt(f)?;
+        f.write_str(", \"refill_secs\": ")?;
+        self.refill_secs.fmt(f)?;
+        f.write_char('}')?;
+
+        Ok(())
+    }
+}
+
 const fn default_port() -> u16 {
     3333
 }
@@ -46,12 +77,22 @@ const fn default_connections_per_ip() -> usize {
     50
 }
 
-const fn default_msg_per_sec() -> u32 {
-    10
+const fn default_msg_freq() -> Ratelimit {
+    Ratelimit {
+        max_tokens: 10,
+        tokens: 10,
+        refill_amount: 10,
+        refill_secs: 1,
+    }
 }
 
-const fn default_bytes_per_10_sec() -> u32 {
-    5_242_880
+const fn default_msg_size() -> Ratelimit {
+    Ratelimit {
+        max_tokens: 5_242_880,
+        tokens: 5_242_880,
+        refill_amount: 5_242_880,
+        refill_secs: 10,
+    }
 }
 
 const fn default_max_message_size() -> usize {

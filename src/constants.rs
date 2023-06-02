@@ -1,7 +1,7 @@
 use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
 
-use crate::config::CONFIG;
+use crate::config::{Ratelimit, CONFIG};
 
 pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -19,28 +19,19 @@ pub const fn is_valid_room(room: &str) -> bool {
     room.len() >= MIN_ROOM_LEN
 }
 
-pub fn get_freq_ratelimiter(msg_per_sec: u32) -> LeakyBucket {
+pub fn get_ratelimiter(ratelimit: &Ratelimit) -> LeakyBucket {
     LeakyBucket::builder()
-        .max(msg_per_sec)
-        .tokens(msg_per_sec)
-        .refill_interval(Duration::from_secs(1))
-        .refill_amount(msg_per_sec)
-        .build()
-}
-
-pub fn get_size_ratelimiter(bytes_per_10_sec: u32) -> LeakyBucket {
-    LeakyBucket::builder()
-        .max(bytes_per_10_sec)
-        .tokens(bytes_per_10_sec)
-        .refill_interval(Duration::from_secs(10))
-        .refill_amount(bytes_per_10_sec)
+        .max(ratelimit.max_tokens)
+        .tokens(ratelimit.tokens)
+        .refill_interval(Duration::from_secs(ratelimit.refill_secs))
+        .refill_amount(ratelimit.refill_amount)
         .build()
 }
 
 pub fn get_global_freq_ratelimiter() -> LeakyBucket {
-    get_freq_ratelimiter(CONFIG.msg_per_sec)
+    get_ratelimiter(&CONFIG.msg_freq_ratelimit)
 }
 
 pub fn get_global_size_ratelimiter() -> LeakyBucket {
-    get_size_ratelimiter(CONFIG.bytes_per_10_sec)
+    get_ratelimiter(&CONFIG.msg_size_ratelimit)
 }

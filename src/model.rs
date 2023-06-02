@@ -25,8 +25,7 @@ pub struct Payload<'a> {
 impl<'a> Payload<'a> {
     pub fn is_invalid(&self) -> bool {
         match self.kind {
-            PayloadKind::Join => self.room.is_empty(),
-            PayloadKind::Leave => self.room.is_empty(),
+            PayloadKind::Join | PayloadKind::Leave => self.room.is_empty(),
             PayloadKind::Message => self.room.is_empty() || self.body.is_none(),
             PayloadKind::Quit => false,
         }

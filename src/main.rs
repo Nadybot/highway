@@ -17,6 +17,7 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use config::Ratelimit;
 use dashmap::{DashMap, DashSet};
 use futures_util::{
     stream::{SplitSink, SplitStream},
@@ -54,10 +55,7 @@ use uuid::Uuid;
 
 use crate::{
     config::CONFIG,
-    constants::{
-        get_freq_ratelimiter, get_global_freq_ratelimiter, get_global_size_ratelimiter,
-        get_size_ratelimiter,
-    },
+    constants::{get_global_freq_ratelimiter, get_global_size_ratelimiter, get_ratelimiter},
 };
 
 mod config;
@@ -258,15 +256,15 @@ impl Peer {
     #[inline]
     fn hello(&self) {
         let _res = self.sender.send(Message::Text(format!(
-            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_per_sec\": {}, \"bytes_per_10_sec\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
+            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
             CONFIG
                 .public_channels
                 .iter()
                 .map(|channel| channel.name.as_str())
                 .collect::<Vec<&str>>(),
             CONFIG.connections_per_ip,
-            CONFIG.msg_per_sec,
-            CONFIG.bytes_per_10_sec,
+            CONFIG.msg_freq_ratelimit,
+            CONFIG.msg_size_ratelimit,
             CONFIG.max_message_size,
             CONFIG.max_frame_size
         )));
@@ -277,19 +275,19 @@ impl Peer {
         &self,
         room_name: &str,
         read_only: bool,
-        msg_per_sec: Option<u32>,
-        bytes_per_10_sec: Option<u32>,
+        msg_freq_ratelimit: Option<&Ratelimit>,
+        msg_size_ratelimit: Option<&Ratelimit>,
         members: &[String],
     ) {
-        let text = match (msg_per_sec, bytes_per_10_sec) {
-            (Some(msg_per_sec), Some(bytes_per_10_sec)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_per_sec\": {msg_per_sec}, \"bytes_per_10_sec\": {bytes_per_10_sec}, \"users\": {members:?}}}")
+        let text = match (msg_freq_ratelimit, msg_size_ratelimit) {
+            (Some(msg_freq_ratelimit), Some(msg_size_ratelimit)) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
-            (Some(msg_per_sec), None) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_per_sec\": {msg_per_sec}, \"users\": {members:?}}}")
+            (Some(msg_freq_ratelimit), None) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
             }
-            (None, Some(bytes_per_10_sec)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"bytes_per_10_sec\": {bytes_per_10_sec}, \"users\": {members:?}}}")
+            (None, Some(msg_size_ratelimit)) => {
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
             (None, None) => {
                 format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"users\": {members:?}}}")
@@ -332,8 +330,8 @@ impl Peer {
             debug!("Room {} exists, adding", room_name);
 
             let room_ratelimiters = Ratelimiters {
-                freq: room.inner.msg_per_sec.map(|b| get_freq_ratelimiter(b)),
-                size: room.inner.bytes_per_10_sec.map(|b| get_size_ratelimiter(b)),
+                freq: room.inner.msg_freq_ratelimit.as_ref().map(get_ratelimiter),
+                size: room.inner.msg_size_ratelimit.as_ref().map(get_ratelimiter),
             };
 
             let subscribed = room.subscribed();
@@ -344,8 +342,8 @@ impl Peer {
             self.room_info(
                 room_name,
                 room.inner.read_only,
-                room.inner.msg_per_sec,
-                room.inner.bytes_per_10_sec,
+                room.inner.msg_freq_ratelimit.as_ref(),
+                room.inner.msg_size_ratelimit.as_ref(),
                 &subscribed,
             );
         } else {
@@ -519,10 +517,10 @@ struct RoomInner {
     name: String,
     /// Whether or not this room is read-only.
     read_only: bool,
-    /// Amount of messages that can be sent per second.
-    msg_per_sec: Option<u32>,
-    /// Amount of bytes that can be sent in 10 seconds.
-    bytes_per_10_sec: Option<u32>,
+    /// Ratelimit for message frequency.
+    msg_freq_ratelimit: Option<Ratelimit>,
+    /// Ratelimit for message size.
+    msg_size_ratelimit: Option<Ratelimit>,
     /// Subcribed peer senders.
     senders: DashMap<String, UnboundedSender<Message>>,
 }
@@ -538,15 +536,15 @@ impl Room {
     fn new(
         name: String,
         read_only: bool,
-        msg_per_sec: Option<u32>,
-        bytes_per_10_sec: Option<u32>,
+        msg_freq_ratelimit: Option<Ratelimit>,
+        msg_size_ratelimit: Option<Ratelimit>,
     ) -> Self {
         Self {
             inner: Arc::new(RoomInner {
                 name,
                 read_only,
-                msg_per_sec,
-                bytes_per_10_sec,
+                msg_freq_ratelimit,
+                msg_size_ratelimit,
                 senders: DashMap::new(),
             }),
         }
@@ -828,8 +826,8 @@ async fn main() -> Result<(), IoError> {
         let room = Room::new(
             room.name.clone(),
             room.read_only,
-            room.msg_per_sec,
-            room.bytes_per_10_sec,
+            room.msg_freq_ratelimit.clone(),
+            room.msg_size_ratelimit.clone(),
         );
         global_state.rooms.insert(room);
     }
