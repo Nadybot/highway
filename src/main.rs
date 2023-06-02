@@ -131,6 +131,7 @@ impl GlobalState {
 
         if entry.connection_count == 0 {
             debug!("Client {} disconnected last connection, removing data", ip);
+            drop(entry);
             self.connections.remove(ip);
         }
     }
