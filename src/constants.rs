@@ -1,7 +1,7 @@
 use leaky_bucket_lite::LeakyBucket;
 use tokio::time::Duration;
 
-use crate::config::{Ratelimit, CONFIG};
+use crate::config::Ratelimit;
 
 pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -23,15 +23,7 @@ pub fn get_ratelimiter(ratelimit: &Ratelimit) -> LeakyBucket {
     LeakyBucket::builder()
         .max(ratelimit.max_tokens)
         .tokens(ratelimit.tokens)
-        .refill_interval(Duration::from_secs(ratelimit.refill_secs))
+        .refill_interval(Duration::from_millis(ratelimit.refill_millis))
         .refill_amount(ratelimit.refill_amount)
         .build()
-}
-
-pub fn get_global_freq_ratelimiter() -> LeakyBucket {
-    get_ratelimiter(&CONFIG.msg_freq_ratelimit)
-}
-
-pub fn get_global_size_ratelimiter() -> LeakyBucket {
-    get_ratelimiter(&CONFIG.msg_size_ratelimit)
 }

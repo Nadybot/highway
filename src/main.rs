@@ -1,24 +1,26 @@
-#![feature(lazy_cell)]
 #![deny(clippy::pedantic)]
-#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 use std::{
     borrow::Borrow,
+    collections::HashSet,
     env::var,
     hash::{Hash, Hasher},
     io::Error as IoError,
     net::{IpAddr, SocketAddr},
+    ops::Deref,
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use config::Ratelimit;
-use dashmap::{DashMap, DashSet};
+use config::{Config, Ratelimit};
+use dashmap::DashMap;
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -35,7 +37,7 @@ use hyper::{
 use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use serde_json::{from_slice, to_string};
+use serde_json::{from_slice, to_string, value::RawValue};
 use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -53,17 +55,14 @@ use tracing::{debug, error, info};
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
-use crate::{
-    config::CONFIG,
-    constants::{get_global_freq_ratelimiter, get_global_size_ratelimiter, get_ratelimiter},
-};
+use crate::constants::get_ratelimiter;
 
 mod config;
 mod constants;
 mod model;
 
 /// A single IP's connection state.
-struct ClientState {
+pub struct ClientState {
     /// Number of connections by this client.
     connection_count: usize,
     /// Global ratelimiters.
@@ -71,11 +70,13 @@ struct ClientState {
 }
 
 /// Global state.
-struct GlobalState {
+pub struct GlobalState {
+    /// Configuration.
+    pub config: Config,
     /// All rooms currently existing in the server.
-    rooms: DashSet<Room>,
+    pub rooms: DashMap<String, Room>,
     /// Current connection state from clients.
-    connections: DashMap<IpAddr, ClientState>,
+    pub connections: DashMap<IpAddr, ClientState>,
 }
 
 impl GlobalState {
@@ -83,15 +84,15 @@ impl GlobalState {
     /// limit is exceeded, else true.
     fn client_connected(&self, ip: &IpAddr, agent: Option<String>) -> bool {
         if let Some(mut entry) = self.connections.get_mut(ip) {
-            if entry.connection_count + 1 > CONFIG.connections_per_ip {
+            if entry.connection_count + 1 > self.config.connections_per_ip {
                 return false;
             }
 
             entry.connection_count += 1;
         } else {
             let ratelimiters = Arc::new(Ratelimiters {
-                freq: Some(get_global_freq_ratelimiter()),
-                size: Some(get_global_size_ratelimiter()),
+                freq: Some(self.config.get_global_freq_ratelimiter()),
+                size: Some(self.config.get_global_size_ratelimiter()),
             });
 
             self.connections.insert(
@@ -256,17 +257,19 @@ impl Peer {
     #[inline]
     fn hello(&self) {
         let _res = self.sender.send(Message::Text(format!(
-            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
-            CONFIG
-                .public_channels
-                .iter()
-                .map(|channel| channel.name.as_str())
-                .collect::<Vec<&str>>(),
-            CONFIG.connections_per_ip,
-            CONFIG.msg_freq_ratelimit,
-            CONFIG.msg_size_ratelimit,
-            CONFIG.max_message_size,
-            CONFIG.max_frame_size
+            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_per_sec\": -1, \"bytes_per_10_sec\": -1, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
+            self.global_state.rooms.iter().filter_map(|r| {
+                if constants::is_valid_room(&r.name) {
+                    None
+                } else {
+                    Some(r.name.clone())
+                }
+            }).collect::<Vec<String>>(),
+            self.global_state.config.connections_per_ip,
+            self.global_state.config.msg_freq_ratelimit,
+            self.global_state.config.msg_size_ratelimit,
+            self.global_state.config.max_message_size,
+            self.global_state.config.max_frame_size
         )));
     }
 
@@ -275,22 +278,25 @@ impl Peer {
         &self,
         room_name: &str,
         read_only: bool,
+        extra_info: Option<&RawValue>,
         msg_freq_ratelimit: Option<&Ratelimit>,
         msg_size_ratelimit: Option<&Ratelimit>,
         members: &[String],
     ) {
+        let extra_info = extra_info.map_or("null", |i| (*i).get());
+
         let text = match (msg_freq_ratelimit, msg_size_ratelimit) {
             (Some(msg_freq_ratelimit), Some(msg_size_ratelimit)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
             (Some(msg_freq_ratelimit), None) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
             }
             (None, Some(msg_size_ratelimit)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
             (None, None) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
             }
         };
 
@@ -312,8 +318,7 @@ impl Peer {
     fn join(&self, room_name: &str) {
         debug!("{} requested to join room {}", self.id, room_name);
 
-        if !(constants::is_valid_room(room_name)
-            || CONFIG.public_channels.iter().any(|c| c.name == room_name))
+        if !(constants::is_valid_room(room_name) || self.global_state.rooms.contains_key(room_name))
         {
             debug!("Room {} is invalid", room_name);
             self.room_name_too_short();
@@ -329,9 +334,11 @@ impl Peer {
         if let Some(room) = maybe_room {
             debug!("Room {} exists, adding", room_name);
 
+            let metadata = room.metadata.load();
+
             let room_ratelimiters = Ratelimiters {
-                freq: room.inner.msg_freq_ratelimit.as_ref().map(get_ratelimiter),
-                size: room.inner.msg_size_ratelimit.as_ref().map(get_ratelimiter),
+                freq: metadata.msg_freq_ratelimit.as_ref().map(get_ratelimiter),
+                size: metadata.msg_size_ratelimit.as_ref().map(get_ratelimiter),
             };
 
             let subscribed = room.subscribed();
@@ -339,11 +346,13 @@ impl Peer {
             self.rooms.insert(room.clone(), room_ratelimiters);
 
             self.successfully_joined_the_room();
+
             self.room_info(
                 room_name,
-                room.inner.read_only,
-                room.inner.msg_freq_ratelimit.as_ref(),
-                room.inner.msg_size_ratelimit.as_ref(),
+                metadata.read_only,
+                metadata.extra_info.as_deref(),
+                metadata.msg_freq_ratelimit.as_ref(),
+                metadata.msg_size_ratelimit.as_ref(),
                 &subscribed,
             );
         } else {
@@ -354,13 +363,15 @@ impl Peer {
                 size: None,
             };
 
-            let room = Room::new(room_name.to_string(), false, None, None);
+            let room = Room::new(room_name.to_string(), false, None, None, None);
             room.subscribe(self);
             self.rooms.insert(room.clone(), room_ratelimiters);
-            self.global_state.rooms.insert(room);
+            self.global_state
+                .rooms
+                .insert(room.inner.name.clone(), room);
 
             self.successfully_joined_the_room();
-            self.room_info(room_name, false, None, None, &[]);
+            self.room_info(room_name, false, None, None, None, &[]);
         }
     }
 
@@ -371,7 +382,7 @@ impl Peer {
         if let Some(entry) = self.rooms.get(room) {
             let room = entry.key();
 
-            if room.inner.read_only && !self.is_admin {
+            if room.metadata.load().read_only && !self.is_admin {
                 self.room_read_only();
             } else {
                 if !self.is_admin {
@@ -512,23 +523,51 @@ impl Peer {
 }
 
 /// A room that clients can connect to.
-struct RoomInner {
+pub struct RoomInner {
     /// Room name.
     name: String,
-    /// Whether or not this room is read-only.
-    read_only: bool,
-    /// Ratelimit for message frequency.
-    msg_freq_ratelimit: Option<Ratelimit>,
-    /// Ratelimit for message size.
-    msg_size_ratelimit: Option<Ratelimit>,
+
+    /// Room metadata.
+    metadata: ArcSwap<RoomMetaData>,
+
     /// Subcribed peer senders.
     senders: DashMap<String, UnboundedSender<Message>>,
 }
 
-/// Wrapper around `RoomInner` to allow indexing room maps by strings.
-#[derive(PartialEq, Eq, Clone, Hash)]
-struct Room {
+/// Room information that can be modified by hot-reloading the config.
+struct RoomMetaData {
+    /// Whether or not this room is read-only.
+    read_only: bool,
+    /// Room extra_info.
+    extra_info: Option<Box<RawValue>>,
+    /// Ratelimit for message frequency.
+    msg_freq_ratelimit: Option<Ratelimit>,
+    /// Ratelimit for message size.
+    msg_size_ratelimit: Option<Ratelimit>,
+}
+
+impl PartialEq for RoomMetaData {
+    fn eq(&self, other: &Self) -> bool {
+        self.read_only == other.read_only
+            && self.extra_info.as_ref().map(|i| i.get())
+                == other.extra_info.as_ref().map(|i| i.get())
+            && self.msg_freq_ratelimit == other.msg_freq_ratelimit
+            && self.msg_size_ratelimit == other.msg_size_ratelimit
+    }
+}
+
+/// Wrapper around `RoomInner`.
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub struct Room {
     inner: Arc<RoomInner>,
+}
+
+impl Deref for Room {
+    type Target = RoomInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl Room {
@@ -536,15 +575,19 @@ impl Room {
     fn new(
         name: String,
         read_only: bool,
+        extra_info: Option<Box<RawValue>>,
         msg_freq_ratelimit: Option<Ratelimit>,
         msg_size_ratelimit: Option<Ratelimit>,
     ) -> Self {
         Self {
             inner: Arc::new(RoomInner {
                 name,
-                read_only,
-                msg_freq_ratelimit,
-                msg_size_ratelimit,
+                metadata: ArcSwap::new(Arc::new(RoomMetaData {
+                    read_only,
+                    extra_info,
+                    msg_freq_ratelimit,
+                    msg_size_ratelimit,
+                })),
                 senders: DashMap::new(),
             }),
         }
@@ -554,8 +597,9 @@ impl Room {
     fn announce_join(&self, id: &str) {
         let msg = Message::text(format!(
             "{{\"type\": \"join\", \"room\": \"{}\", \"user\": \"{}\"}}",
-            self.inner.name, id
+            self.name, id
         ));
+
         self.broadcast(&msg, None);
     }
 
@@ -563,8 +607,9 @@ impl Room {
     fn announce_leave(&self, id: &str) {
         let msg = Message::text(format!(
             "{{\"type\": \"leave\", \"room\": \"{}\", \"user\": \"{}\"}}",
-            self.inner.name, id
+            self.name, id
         ));
+
         self.broadcast(&msg, None);
     }
 
@@ -573,13 +618,10 @@ impl Room {
     fn broadcast(&self, msg: &Message, sender: Option<&str>) {
         if sender.is_some() {
             metrics::increment_counter!("highway_messages_received");
-            metrics::counter!(
-                "highway_messages_sent",
-                (self.inner.senders.len() - 1) as u64
-            );
+            metrics::counter!("highway_messages_sent", (self.senders.len() - 1) as u64);
         }
 
-        for send_handle in self.inner.senders.iter() {
+        for send_handle in self.senders.iter() {
             if sender != Some(send_handle.key()) {
                 let _res = send_handle.send(msg.clone());
             }
@@ -588,11 +630,7 @@ impl Room {
 
     /// Returns a list of subscribed peer IDs.
     fn subscribed(&self) -> Vec<String> {
-        self.inner
-            .senders
-            .iter()
-            .map(|e| e.key().to_string())
-            .collect()
+        self.senders.iter().map(|e| e.key().to_string()).collect()
     }
 
     /// Subscribe a peer to this room.
@@ -601,25 +639,62 @@ impl Room {
 
         debug!("Subcribed to messages from room");
 
-        self.inner
-            .senders
-            .insert(peer.id.clone(), peer.sender.clone());
+        self.senders.insert(peer.id.clone(), peer.sender.clone());
 
-        metrics::gauge!("highway_room_connections", self.inner.senders.len() as f64, "room" => self.inner.name.clone());
+        metrics::gauge!("highway_room_connections", self.senders.len() as f64, "room" => self.name.clone());
     }
 
     /// Unsubscribe a peer from this room.
     fn unsubscribe(&self, peer: &Peer) {
-        self.inner.senders.remove(&peer.id);
+        self.senders.remove(&peer.id);
         self.announce_leave(&peer.id);
 
-        if self.inner.senders.is_empty() && !self.inner.read_only {
+        if self.senders.is_empty() && constants::is_valid_room(&self.name) {
             // All members left
-            debug!("Deleting room {}", self.inner.name);
+            debug!("Deleting room {}", self.name);
             peer.global_state.rooms.remove(self.inner.name.as_str());
         }
 
-        metrics::gauge!("highway_room_connections", self.inner.senders.len() as f64, "room" => self.inner.name.clone());
+        metrics::gauge!("highway_room_connections", self.senders.len() as f64, "room" => self.name.clone());
+    }
+
+    /// Send a new room-info to everyone.
+    pub fn resend_room_info(&self) {
+        let metadata = self.metadata.load();
+        let room_name = &self.name;
+        let read_only = metadata.read_only;
+
+        let extra_info = metadata.extra_info.as_ref().map_or("null", |i| (*i).get());
+
+        let mut subscribed: HashSet<String> = HashSet::from_iter(self.subscribed());
+
+        for sender in self.senders.iter() {
+            subscribed.remove(sender.key());
+
+            let members = subscribed.iter().collect::<Vec<_>>();
+
+            let text = match (
+                metadata.msg_freq_ratelimit.as_ref(),
+                metadata.msg_size_ratelimit.as_ref(),
+            ) {
+                (Some(msg_freq_ratelimit), Some(msg_size_ratelimit)) => {
+                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                }
+                (Some(msg_freq_ratelimit), None) => {
+                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
+                }
+                (None, Some(msg_size_ratelimit)) => {
+                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                }
+                (None, None) => {
+                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
+                }
+            };
+
+            let _res = sender.send(Message::Text(text));
+
+            subscribed.insert(sender.key().clone());
+        }
     }
 }
 
@@ -647,16 +722,16 @@ type GlobalStateRef = Arc<GlobalState>;
 
 async fn websocket_endpoint_handler(
     addr: SocketAddr,
-    mut req: Request<Body>,
+    mut request: Request<Body>,
     global_state: GlobalStateRef,
 ) -> Result<Response<Body>, HyperError> {
-    let mut res = Response::new(Body::empty());
+    let mut response = Response::new(Body::empty());
 
     let mut ip = addr.ip();
     let mut is_admin = false;
 
-    if CONFIG.behind_proxy {
-        if let Some(header) = req.headers().get("X-Forwarded-For") {
+    if global_state.config.behind_proxy {
+        if let Some(header) = request.headers().get("X-Forwarded-For") {
             if let Ok(value) = header.to_str() {
                 if let Some(client_ip_str) = value.split(',').next() {
                     if let Ok(client_ip) = client_ip_str.trim().parse() {
@@ -669,8 +744,8 @@ async fn websocket_endpoint_handler(
 
     info!("Incoming connection from {:?}", ip);
 
-    let auth = req.headers().get(AUTHORIZATION);
-    if let (Some(header), Some(hash)) = (auth, CONFIG.admin_password_hash.as_ref()) {
+    let auth = request.headers().get(AUTHORIZATION);
+    if let (Some(header), Some(hash)) = (auth, global_state.config.admin_password_hash.as_ref()) {
         let hasher = Argon2::default();
         let parsed_hash = PasswordHash::new(hash).unwrap();
         if hasher
@@ -681,26 +756,28 @@ async fn websocket_endpoint_handler(
         }
     }
 
-    if !req.headers().contains_key(UPGRADE) || !req.headers().contains_key(SEC_WEBSOCKET_KEY) {
-        *res.status_mut() = StatusCode::BAD_REQUEST;
-        return Ok(res);
+    if !request.headers().contains_key(UPGRADE)
+        || !request.headers().contains_key(SEC_WEBSOCKET_KEY)
+    {
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
     }
 
-    let upgrade = req.headers().get(UPGRADE).unwrap();
+    let upgrade = request.headers().get(UPGRADE).unwrap();
 
     if upgrade.to_str().unwrap() != "websocket" {
-        *res.status_mut() = StatusCode::BAD_REQUEST;
-        return Ok(res);
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
     }
 
-    let key = req.headers().get(SEC_WEBSOCKET_KEY).unwrap();
+    let key = request.headers().get(SEC_WEBSOCKET_KEY).unwrap();
 
     let mut hasher = Sha1::new();
     hasher.update(key);
     hasher.update(constants::GUID);
     let real_key = STANDARD.encode(hasher.finalize());
 
-    let agent = req
+    let agent = request
         .headers()
         .get(USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -708,12 +785,12 @@ async fn websocket_endpoint_handler(
 
     if !global_state.client_connected(&ip, agent.clone()) {
         debug!("Connection limit exceeded by IP {}, disconnecting", ip);
-        *res.status_mut() = StatusCode::FORBIDDEN;
-        return Ok(res);
+        *response.status_mut() = StatusCode::FORBIDDEN;
+        return Ok(response);
     };
 
     tokio::spawn(async move {
-        match hyper::upgrade::on(&mut req).await {
+        match hyper::upgrade::on(&mut request).await {
             Ok(upgraded) => {
                 let ws_stream = WebSocketStream::from_raw_socket(
                     upgraded,
@@ -721,8 +798,8 @@ async fn websocket_endpoint_handler(
                     Some(WebSocketConfig {
                         accept_unmasked_frames: false,
                         max_send_queue: None,
-                        max_message_size: Some(CONFIG.max_message_size),
-                        max_frame_size: Some(CONFIG.max_frame_size),
+                        max_message_size: Some(global_state.config.max_message_size),
+                        max_frame_size: Some(global_state.config.max_frame_size),
                     }),
                 )
                 .await;
@@ -737,19 +814,22 @@ async fn websocket_endpoint_handler(
         }
     });
 
-    *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    res.headers_mut()
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    response
+        .headers_mut()
         .insert(CONNECTION, HeaderValue::from_static("Upgrade"));
-    res.headers_mut()
+    response
+        .headers_mut()
         .insert(UPGRADE, HeaderValue::from_static("websocket"));
-    res.headers_mut().insert(
+    response.headers_mut().insert(
         SEC_WEBSOCKET_ACCEPT,
         HeaderValue::from_str(&real_key).unwrap(),
     );
-    res.headers_mut()
+    response
+        .headers_mut()
         .insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
 
-    Ok(res)
+    Ok(response)
 }
 
 async fn http_handler(
@@ -763,7 +843,7 @@ async fn http_handler(
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => websocket_endpoint_handler(addr, req, global_state).await,
         (&Method::GET, "/metrics") => {
-            if let Some(auth_required) = &CONFIG.metrics_token {
+            if let Some(auth_required) = &global_state.config.metrics_token {
                 if let Some(auth) = req.headers().get(AUTHORIZATION) {
                     if auth != auth_required {
                         return Ok(Response::builder()
@@ -816,21 +896,38 @@ async fn main() -> Result<(), IoError> {
     let metrics_handle = Arc::new(recorder.handle());
     metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
 
-    let addr: SocketAddr = ([0, 0, 0, 0], CONFIG.port).into();
+    let mut config = match config::try_load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to load config: {e}");
+            return Ok(());
+        }
+    };
+
+    let addr: SocketAddr = ([0, 0, 0, 0], config.port).into();
+
+    let rooms = DashMap::new();
+
+    for room in config.public_channels.drain(..) {
+        let room = Room::new(
+            room.name,
+            room.read_only,
+            room.extra_info,
+            room.msg_freq_ratelimit,
+            room.msg_size_ratelimit,
+        );
+        rooms.insert(room.inner.name.clone(), room);
+    }
+
     let global_state = Arc::new(GlobalState {
-        rooms: DashSet::new(),
+        config,
+        rooms,
         connections: DashMap::new(),
     });
 
-    for room in &CONFIG.public_channels {
-        let room = Room::new(
-            room.name.clone(),
-            room.read_only,
-            room.msg_freq_ratelimit.clone(),
-            room.msg_size_ratelimit.clone(),
-        );
-        global_state.rooms.insert(room);
-    }
+    // Start the config hot-reloader
+    let global_state_copy = global_state.clone();
+    tokio::spawn(config::reloader(global_state_copy));
 
     let make_service = make_service_fn(move |addr: &AddrStream| {
         let remote_addr = addr.remote_addr();
