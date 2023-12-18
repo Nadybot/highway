@@ -39,8 +39,6 @@ pub struct Config {
     pub msg_size_ratelimit: Ratelimit,
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
-    #[serde(default = "default_max_frame_size")]
-    pub max_frame_size: usize,
     #[serde(default)]
     pub admin_password_hash: Option<String>,
     #[serde(default)]
@@ -116,10 +114,6 @@ const fn default_max_message_size() -> usize {
     1_048_576
 }
 
-const fn default_max_frame_size() -> usize {
-    1_048_576
-}
-
 const fn default_behind_proxy() -> bool {
     false
 }
@@ -154,13 +148,14 @@ pub async fn reloader(global_state: GlobalStateRef) {
         config_dir_path = Path::new(".");
     }
 
-    let Ok(mut inotify) = Inotify::init() else {
+    let Ok(inotify) = Inotify::init() else {
         error!("Failed to initialize inotify");
         return;
     };
 
     if inotify
-        .add_watch(config_dir_path, WatchMask::MODIFY)
+        .watches()
+        .add(config_dir_path, WatchMask::MODIFY)
         .is_err()
     {
         error!("Failed to add inotify watch");
@@ -168,7 +163,7 @@ pub async fn reloader(global_state: GlobalStateRef) {
     };
 
     let mut buffer = [0; 1024];
-    let Ok(mut stream) = inotify.event_stream(&mut buffer) else {
+    let Ok(mut stream) = inotify.into_event_stream(&mut buffer) else {
         error!("Failed to create inotify event stream");
         return;
     };

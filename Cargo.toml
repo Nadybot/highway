@@ -9,19 +9,25 @@ edition = "2021"
 arc-swap = "1.6"
 argon2 = { version = "0.5", default-features = false, features = [
     "password-hash",
-    "alloc"
+    "alloc",
 ] }
 base64 = "0.21"
+bytes = "1"
 dashmap = { version = "5.1", default-features = false }
-hyper = { version = "0.14", default-features = false, features = [
+futures-util = { version = "0.3", default-features = false, features = [
+    "std",
+    "sink",
+] }
+http-body-util = { version = "0.1", default-features = false }
+hyper = { version = "1", default-features = false, features = [
     "server",
     "http1",
-    "tcp"
 ] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 inotify = { version = "0.10", default-features = false, features = ["stream"] }
 leaky-bucket-lite = { version = "0.5", default-features = false, features = [
     "tokio",
-    "parking_lot"
+    "parking_lot",
 ] }
 libc = { version = "0.2", default-features = false }
 metrics = { version = "0.21", default-features = false }
@@ -33,17 +39,17 @@ tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
 ] }
-tokio-tungstenite = { version = "0.19", default-features = false, features = [
-    "connect"
+tokio-websockets = { version = "0.5", default-features = false, features = [
+    "server",
+    "sha1_smol",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "parking_lot",
-    "std"
+    "std",
 ] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
-futures-util = { version = "0.3", default-features = false }
 
 [profile.dev]
 panic = "abort"

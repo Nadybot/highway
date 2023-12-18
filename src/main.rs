@@ -19,21 +19,25 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use bytes::{Bytes, BytesMut};
 use config::{Config, Ratelimit};
 use dashmap::DashMap;
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use http_body_util::Full;
 use hyper::{
+    body::Incoming,
     header::{
         HeaderValue, AUTHORIZATION, CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
         SEC_WEBSOCKET_VERSION, UPGRADE, USER_AGENT,
     },
-    server::conn::AddrStream,
-    service::{make_service_fn, service_fn},
-    Body, Error as HyperError, Method, Request, Response, Server, StatusCode,
+    server::conn::http1,
+    service::service_fn,
+    Error as HyperError, Method, Request, Response, StatusCode,
 };
+use hyper_util::rt::TokioIo;
 use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -41,16 +45,11 @@ use serde_json::{from_slice, to_string, value::RawValue};
 use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
+    net::TcpListener,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     time::timeout,
 };
-use tokio_tungstenite::{
-    tungstenite::{
-        protocol::{Role, WebSocketConfig},
-        Message,
-    },
-    WebSocketStream,
-};
+use tokio_websockets::{Limits, Message, ServerBuilder, WebSocketStream};
 use tracing::{debug, error, info};
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -223,40 +222,40 @@ impl Peer {
     fn successfully_joined_the_room(&self) {
         let _res = self
             .sender
-            .send(Message::Text(constants::ROOM_JOIN_MSG.to_string()));
+            .send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
     }
 
     #[inline]
     fn successfully_left_the_room(&self) {
         let _res = self
             .sender
-            .send(Message::Text(constants::ROOM_LEAVE_MSG.to_string()));
+            .send(Message::text(constants::ROOM_LEAVE_MSG.to_string()));
     }
 
     #[inline]
     fn room_name_too_short(&self) {
         let _res = self
             .sender
-            .send(Message::Text(constants::ROOM_NAME_TOO_SHORT.to_string()));
+            .send(Message::text(constants::ROOM_NAME_TOO_SHORT.to_string()));
     }
 
     #[inline]
     fn invalid_room(&self) {
         let _res = self
             .sender
-            .send(Message::Text(constants::INVALID_ROOM_MSG.to_string()));
+            .send(Message::text(constants::INVALID_ROOM_MSG.to_string()));
     }
 
     #[inline]
     fn room_read_only(&self) {
         let _res = self
             .sender
-            .send(Message::Text(constants::ROOM_READ_ONLY.to_string()));
+            .send(Message::text(constants::ROOM_READ_ONLY.to_string()));
     }
 
     #[inline]
     fn hello(&self) {
-        let _res = self.sender.send(Message::Text(format!(
+        let _res = self.sender.send(Message::text(format!(
             "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_per_sec\": -1, \"bytes_per_10_sec\": -1, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
             self.global_state.rooms.iter().filter_map(|r| {
                 if constants::is_valid_room(&r.name) {
@@ -269,7 +268,7 @@ impl Peer {
             self.global_state.config.msg_freq_ratelimit,
             self.global_state.config.msg_size_ratelimit,
             self.global_state.config.max_message_size,
-            self.global_state.config.max_frame_size
+            self.global_state.config.max_message_size
         )));
     }
 
@@ -300,7 +299,7 @@ impl Peer {
             }
         };
 
-        let _res = self.sender.send(Message::Text(text));
+        let _res = self.sender.send(Message::text(text));
     }
 
     /// Leave a room.
@@ -377,7 +376,7 @@ impl Peer {
 
     /// Send a message in a room.
     async fn send_message(&self, room: &str, payload: &model::Payload<'_>, data_size: usize) {
-        let message = Message::Text(to_string(payload).expect("Will always be valid JSON"));
+        let message = Message::text(to_string(payload).expect("Will always be valid JSON"));
 
         if let Some(entry) = self.rooms.get(room) {
             let room = entry.key();
@@ -405,7 +404,7 @@ impl Peer {
                     debug!("Payload is invalid!");
                     let _res = self
                         .sender
-                        .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
+                        .send(Message::text(constants::INVALID_JSON_MSG.to_string()));
                 } else {
                     match payload.kind {
                         model::PayloadKind::Message => {
@@ -428,7 +427,7 @@ impl Peer {
                 debug!("Error in JSON: {:?}", e);
                 let _res = self
                     .sender
-                    .send(Message::Text(constants::INVALID_JSON_MSG.to_string()));
+                    .send(Message::text(constants::INVALID_JSON_MSG.to_string()));
             }
         }
 
@@ -473,25 +472,18 @@ impl Peer {
 
                     awaiting_pong = false;
 
-                    match msg {
-                        Message::Ping(payload) => {
-                            let _res = self.sender.send(Message::Pong(payload));
+                    if msg.is_binary() || msg.is_text() {
+                        let payload = msg.into_payload();
+
+                        if !self.is_admin {
+                            self.ratelimiters.send_message(payload.len()).await;
                         }
-                        Message::Close(_) => break,
-                        Message::Binary(_) | Message::Text(_) => {
-                            let payload = msg.into_data();
 
-                            if !self.is_admin {
-                                self.ratelimiters.send_message(payload.len()).await;
-                            }
+                        let should_quit = self.on_message(&payload).await;
 
-                            let should_quit = self.on_message(&payload).await;
-
-                            if should_quit {
-                                break;
-                            }
+                        if should_quit {
+                            break;
                         }
-                        Message::Pong(_) | Message::Frame(_) => {}
                     }
                 }
                 Err(_) => {
@@ -501,7 +493,7 @@ impl Peer {
                     }
 
                     awaiting_pong = true;
-                    let msg = Message::Ping(Vec::new());
+                    let msg = Message::ping(BytesMut::new());
                     let _res = self.sender.send(msg);
                 }
                 _ => break,
@@ -691,7 +683,7 @@ impl Room {
                 }
             };
 
-            let _res = sender.send(Message::Text(text));
+            let _res = sender.send(Message::text(text));
 
             subscribed.insert(sender.key().clone());
         }
@@ -722,10 +714,10 @@ type GlobalStateRef = Arc<GlobalState>;
 
 async fn websocket_endpoint_handler(
     addr: SocketAddr,
-    mut request: Request<Body>,
+    mut request: Request<Incoming>,
     global_state: GlobalStateRef,
-) -> Result<Response<Body>, HyperError> {
-    let mut response = Response::new(Body::empty());
+) -> Result<Response<Full<Bytes>>, HyperError> {
+    let mut response = Response::new(Full::default());
 
     let mut ip = addr.ip();
     let mut is_admin = false;
@@ -792,17 +784,12 @@ async fn websocket_endpoint_handler(
     tokio::spawn(async move {
         match hyper::upgrade::on(&mut request).await {
             Ok(upgraded) => {
-                let ws_stream = WebSocketStream::from_raw_socket(
-                    upgraded,
-                    Role::Server,
-                    Some(WebSocketConfig {
-                        accept_unmasked_frames: false,
-                        max_send_queue: None,
-                        max_message_size: Some(global_state.config.max_message_size),
-                        max_frame_size: Some(global_state.config.max_frame_size),
-                    }),
-                )
-                .await;
+                let limits =
+                    Limits::default().max_payload_len(Some(global_state.config.max_message_size));
+
+                let ws_stream = ServerBuilder::new()
+                    .limits(limits)
+                    .serve(TokioIo::new(upgraded));
 
                 Peer::start_from_stream(global_state, ip, agent, ws_stream, is_admin);
             }
@@ -834,10 +821,10 @@ async fn websocket_endpoint_handler(
 
 async fn http_handler(
     addr: SocketAddr,
-    req: Request<Body>,
+    req: Request<Incoming>,
     global_state: GlobalStateRef,
     metrics_handle: Arc<PrometheusHandle>,
-) -> Result<Response<Body>, HyperError> {
+) -> Result<Response<Full<Bytes>>, HyperError> {
     debug!("{} request to {}", req.method(), req.uri().path());
 
     match (req.method(), req.uri().path()) {
@@ -848,24 +835,24 @@ async fn http_handler(
                     if auth != auth_required {
                         return Ok(Response::builder()
                             .status(StatusCode::FORBIDDEN)
-                            .body(Body::empty())
+                            .body(Full::default())
                             .unwrap());
                     }
                 } else {
                     return Ok(Response::builder()
                         .status(StatusCode::FORBIDDEN)
-                        .body(Body::empty())
+                        .body(Full::default())
                         .unwrap());
                 }
             }
 
             Ok(Response::builder()
-                .body(Body::from(metrics_handle.render()))
+                .body(Full::from(metrics_handle.render()))
                 .unwrap())
         }
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
+            .body(Full::default())
             .unwrap()),
     }
 }
@@ -929,30 +916,38 @@ async fn main() -> Result<(), IoError> {
     let global_state_copy = global_state.clone();
     tokio::spawn(config::reloader(global_state_copy));
 
-    let make_service = make_service_fn(move |addr: &AddrStream| {
-        let remote_addr = addr.remote_addr();
-        let global_state = global_state.clone();
-        let metrics_handle = metrics_handle.clone();
-
-        async move {
-            Ok::<_, HyperError>(service_fn(move |req: Request<Body>| {
-                http_handler(
-                    remote_addr,
-                    req,
-                    global_state.clone(),
-                    metrics_handle.clone(),
-                )
-            }))
-        }
-    });
-
-    let server = Server::bind(&addr).serve(make_service);
+    let listener = TcpListener::bind(&addr).await?;
 
     info!("Listening on: {}", addr);
 
-    if let Err(why) = server.await {
-        error!("Fatal server error: {}", why);
-    }
+    loop {
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok((stream, remote_addr)) => (stream, remote_addr),
+            Err(e) => {
+                error!("Failed to accept TCP connection: {e}");
+                continue;
+            }
+        };
 
-    Ok(())
+        let global_state = global_state.clone();
+        let metrics_handle = metrics_handle.clone();
+
+        if let Err(e) = http1::Builder::new()
+            .serve_connection(
+                TokioIo::new(stream),
+                service_fn(move |req: Request<Incoming>| {
+                    http_handler(
+                        remote_addr,
+                        req,
+                        global_state.clone(),
+                        metrics_handle.clone(),
+                    )
+                }),
+            )
+            .with_upgrades()
+            .await
+        {
+            error!("Failed to serve connection: {e}");
+        };
+    }
 }
