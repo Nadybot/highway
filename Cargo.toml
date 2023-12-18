@@ -24,7 +24,6 @@ hyper = { version = "1", default-features = false, features = [
     "http1",
 ] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
-inotify = { version = "0.10", default-features = false, features = ["stream"] }
 leaky-bucket-lite = { version = "0.5", default-features = false, features = [
     "tokio",
     "parking_lot",
@@ -50,6 +49,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "std",
 ] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+inotify = { version = "0.10", default-features = false, features = ["stream"] }
 
 [profile.dev]
 panic = "abort"

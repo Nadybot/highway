@@ -913,8 +913,11 @@ async fn main() -> Result<(), IoError> {
     });
 
     // Start the config hot-reloader
-    let global_state_copy = global_state.clone();
-    tokio::spawn(config::reloader(global_state_copy));
+    #[cfg(unix)]
+    {
+        let global_state_copy = global_state.clone();
+        tokio::spawn(config::reloader(global_state_copy));
+    }
 
     let listener = TcpListener::bind(&addr).await?;
 
