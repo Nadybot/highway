@@ -827,7 +827,7 @@ async fn http_handler(
 ) -> Result<Response<Full<Bytes>>, HyperError> {
     debug!("{} request to {}", req.method(), req.uri().path());
 
-    match (req.method(), req.uri().path()) {
+    let mut resp = match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => websocket_endpoint_handler(addr, req, global_state).await,
         (&Method::GET, "/metrics") => {
             if let Some(auth_required) = &global_state.config.metrics_token {
@@ -854,7 +854,16 @@ async fn http_handler(
             .status(StatusCode::NOT_FOUND)
             .body(Full::default())
             .unwrap()),
+    };
+
+    if let Ok(resp) = resp.as_mut() {
+        resp.headers_mut().insert(
+            "X-Highway-Version",
+            HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
     }
+
+    resp
 }
 
 pub extern "C" fn handler(_: c_int) {
