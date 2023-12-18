@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 inotify = { version = "0.10", default-features = false, features = ["stream"] }
 
 [profile.dev]

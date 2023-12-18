@@ -5,9 +5,9 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use inotify::{Inotify, WatchMask};
 use leaky_bucket_lite::LeakyBucket;
 use serde::Deserialize;
@@ -134,7 +134,7 @@ pub fn try_load() -> Result<Config, serde_json::Error> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub async fn reloader(global_state: GlobalStateRef) {
     let file = std::env::args()
         .nth(1)
