@@ -5,6 +5,7 @@ on:
     branches:
       - unstable
       - stable
+      - 0.2.0
     tags:
       - '*'
   pull_request:
