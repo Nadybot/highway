@@ -99,7 +99,7 @@ const fn default_msg_freq() -> Ratelimit {
         max_tokens: 10,
         tokens: 10,
         refill_amount: 10,
-        refill_millis: 1,
+        refill_millis: 1000,
     }
 }
 
@@ -108,7 +108,7 @@ const fn default_msg_size() -> Ratelimit {
         max_tokens: 5_242_880,
         tokens: 5_242_880,
         refill_amount: 5_242_880,
-        refill_millis: 10,
+        refill_millis: 10000,
     }
 }
 

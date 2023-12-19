@@ -1,10 +1,8 @@
 {
   "port": 3333,
   "connections_per_ip": 2,
-  "msg_per_sec": 10,
-  "bytes_per_10_sec": 500,
   "msg_freq_ratelimit": {
-    "max_tokens": 100000,
+    "max_tokens": 10,
     "tokens": 10,
     "refill_amount": 10,
     "refill_millis": 1000
@@ -15,17 +13,26 @@
     "refill_amount": 524288,
     "refill_millis": 1000
   },
-
   "max_message_size": 1048576,
-  "max_frame_size": 1048576,
   "admin_password_hash": "$argon2id$v=19$m=4096,t=3,p=1$aGlnaHdheWlzc3VwcmVtZQ$KppnM084YRY1MkzMPteCzn+QF30mwFl9qIuwHUOsGfE",
   "public_channels": [
     {
-      "name": "update_notifications",
-      "extra_info": { "fuckyou": "in particular" },
-      "msg_per_sec": 1,
-      "bytes_per_10_sec": 9999999
+      "name": "demo_room",
+      "extra_info": { "hello": "world" },
+      "msg_freq_ratelimit": {
+        "max_tokens": 1,
+        "tokens": 1,
+        "refill_amount": 1,
+        "refill_millis": 10000
+      },
+      "msg_size_ratelimit": {
+        "max_tokens": 1048576,
+        "tokens": 1048576,
+        "refill_amount": 1024,
+        "refill_millis": 10000
+      }
     }
   ],
-  "behind_proxy": false
+  "behind_proxy": false,
+  "metrics_token": "supersecret"
 }

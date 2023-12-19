@@ -5,6 +5,7 @@ use std::{
     collections::HashSet,
     env::var,
     hash::{Hash, Hasher},
+    hint::unreachable_unchecked,
     io::Error as IoError,
     net::{IpAddr, SocketAddr},
     ops::Deref,
@@ -219,44 +220,15 @@ impl Peer {
     }
 
     #[inline]
-    fn successfully_joined_the_room(&self) {
-        let _res = self
-            .sender
-            .send(Message::text(constants::ROOM_JOIN_MSG.to_string()));
-    }
-
-    #[inline]
-    fn successfully_left_the_room(&self) {
-        let _res = self
-            .sender
-            .send(Message::text(constants::ROOM_LEAVE_MSG.to_string()));
-    }
-
-    #[inline]
-    fn room_name_too_short(&self) {
-        let _res = self
-            .sender
-            .send(Message::text(constants::ROOM_NAME_TOO_SHORT.to_string()));
-    }
-
-    #[inline]
-    fn invalid_room(&self) {
-        let _res = self
-            .sender
-            .send(Message::text(constants::INVALID_ROOM_MSG.to_string()));
-    }
-
-    #[inline]
-    fn room_read_only(&self) {
-        let _res = self
-            .sender
-            .send(Message::text(constants::ROOM_READ_ONLY.to_string()));
+    fn send(&self, payload: &model::Payload<'_>) {
+        let serialized = serde_json::to_string(payload).unwrap();
+        let _res = self.sender.send(Message::text(serialized));
     }
 
     #[inline]
     fn hello(&self) {
         let _res = self.sender.send(Message::text(format!(
-            "{{\"type\": \"hello\", \"public-rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_per_sec\": -1, \"bytes_per_10_sec\": -1, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}, \"max_frame_size\": {}}}}}",
+            "{{\"type\": \"hello\", \"public_rooms\": {:?}, \"config\": {{\"connections_per_ip\": {}, \"msg_freq_ratelimit\": {}, \"msg_size_ratelimit\": {}, \"max_message_size\": {}}}}}",
             self.global_state.rooms.iter().filter_map(|r| {
                 if constants::is_valid_room(&r.name) {
                     None
@@ -268,7 +240,6 @@ impl Peer {
             self.global_state.config.msg_freq_ratelimit,
             self.global_state.config.msg_size_ratelimit,
             self.global_state.config.max_message_size,
-            self.global_state.config.max_message_size
         )));
     }
 
@@ -286,16 +257,16 @@ impl Peer {
 
         let text = match (msg_freq_ratelimit, msg_size_ratelimit) {
             (Some(msg_freq_ratelimit), Some(msg_size_ratelimit)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
             (Some(msg_freq_ratelimit), None) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
             }
             (None, Some(msg_size_ratelimit)) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
             }
             (None, None) => {
-                format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
+                format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
             }
         };
 
@@ -303,29 +274,33 @@ impl Peer {
     }
 
     /// Leave a room.
-    fn leave(&self, room_name: &str) {
+    fn leave(&self, payload: model::Payload<'_>) {
+        let room_name = payload.room;
+
         if let Some((room, _)) = self.rooms.remove(room_name) {
             room.unsubscribe(self);
             debug!("{} unsubscribed from room {}", self.id, room_name);
-            self.successfully_left_the_room();
+            self.send(&payload.reply_room_leave());
         } else {
-            self.invalid_room();
+            self.send(&payload.reply_invalid_room());
         }
     }
 
     /// Join a room.
-    fn join(&self, room_name: &str) {
+    fn join(&self, payload: model::Payload<'_>) {
+        let room_name = payload.room;
+
         debug!("{} requested to join room {}", self.id, room_name);
 
         if !(constants::is_valid_room(room_name) || self.global_state.rooms.contains_key(room_name))
         {
             debug!("Room {} is invalid", room_name);
-            self.room_name_too_short();
+            self.send(&payload.reply_room_name_too_short());
             return;
         }
 
         if self.rooms.get(room_name).is_some() {
-            self.invalid_room();
+            self.send(&payload.reply_invalid_room());
             return;
         }
 
@@ -344,7 +319,7 @@ impl Peer {
             room.subscribe(self);
             self.rooms.insert(room.clone(), room_ratelimiters);
 
-            self.successfully_joined_the_room();
+            self.send(&payload.reply_room_join());
 
             self.room_info(
                 room_name,
@@ -369,7 +344,7 @@ impl Peer {
                 .rooms
                 .insert(room.inner.name.clone(), room);
 
-            self.successfully_joined_the_room();
+            self.send(&payload.reply_room_join());
             self.room_info(room_name, false, None, None, None, &[]);
         }
     }
@@ -382,7 +357,7 @@ impl Peer {
             let room = entry.key();
 
             if room.metadata.load().read_only && !self.is_admin {
-                self.room_read_only();
+                self.send(&payload.reply_room_read_only());
             } else {
                 if !self.is_admin {
                     let ratelimiters = entry.value();
@@ -392,7 +367,7 @@ impl Peer {
                 room.broadcast(&message, Some(&self.id));
             }
         } else {
-            self.invalid_room();
+            self.send(&payload.reply_invalid_room());
         }
     }
 
@@ -402,9 +377,11 @@ impl Peer {
             Ok(mut payload) => {
                 if payload.is_invalid() {
                     debug!("Payload is invalid!");
-                    let _res = self
-                        .sender
-                        .send(Message::text(constants::INVALID_JSON_MSG.to_string()));
+                    // Reply should still reference any ID set in the request
+                    let reply = payload.reply_invalid_msg();
+                    let json = serde_json::to_string(&reply).unwrap();
+
+                    let _res = self.sender.send(Message::text(json));
                 } else {
                     match payload.kind {
                         model::PayloadKind::Message => {
@@ -412,14 +389,15 @@ impl Peer {
                             self.send_message(payload.room, &payload, data.len()).await;
                         }
                         model::PayloadKind::Join => {
-                            self.join(payload.room);
+                            self.join(payload);
                         }
                         model::PayloadKind::Leave => {
-                            self.leave(payload.room);
+                            self.leave(payload);
                         }
                         model::PayloadKind::Quit => {
                             return true;
                         }
+                        _ => unsafe { unreachable_unchecked() }, // Verified by is_invalid
                     }
                 }
             }
@@ -670,16 +648,16 @@ impl Room {
                 metadata.msg_size_ratelimit.as_ref(),
             ) {
                 (Some(msg_freq_ratelimit), Some(msg_size_ratelimit)) => {
-                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                    format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
                 }
                 (Some(msg_freq_ratelimit), None) => {
-                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
+                    format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_freq_ratelimit\": {msg_freq_ratelimit}, \"users\": {members:?}}}")
                 }
                 (None, Some(msg_size_ratelimit)) => {
-                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
+                    format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"msg_size_ratelimit\": {msg_size_ratelimit}, \"users\": {members:?}}}")
                 }
                 (None, None) => {
-                    format!("{{\"type\": \"room-info\", \"room\": \"{room_name}\", \"read-only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
+                    format!("{{\"type\": \"room_info\", \"room\": \"{room_name}\", \"read_only\": {read_only}, \"extra_info\": {extra_info}, \"users\": {members:?}}}")
                 }
             };
 

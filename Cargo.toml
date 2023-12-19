@@ -1,6 +1,6 @@
 [package]
 name = "highway"
-version = "0.1.1"
+version = "0.2.0-alpha.1"
 authors = ["Jens Reidel <adrian@travitia.xyz>"]
 edition = "2021"
 
