@@ -3,7 +3,7 @@ use tokio::time::Duration;
 
 use crate::config::Ratelimit;
 
-pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+pub const GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub const INVALID_ROOM_MSG: &str = "\"You attempted to interact with an invalid room, either because you are subscribed and trying to subscribe again or because you are not subscribed and unsubscribing or sending a message\"";
 pub const ROOM_NAME_TOO_SHORT: &str = "\"The room name provided is shorter than 32 characters\"";

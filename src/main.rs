@@ -43,7 +43,7 @@ use leaky_bucket_lite::LeakyBucket;
 use libc::{c_int, sighandler_t, signal, SIGINT, SIGTERM};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde_json::{from_slice, to_string, value::RawValue};
-use sha1::{Digest, Sha1};
+use sha1_smol::Sha1;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpListener,
@@ -743,9 +743,9 @@ async fn websocket_endpoint_handler(
     let key = request.headers().get(SEC_WEBSOCKET_KEY).unwrap();
 
     let mut hasher = Sha1::new();
-    hasher.update(key);
+    hasher.update(key.as_bytes());
     hasher.update(constants::GUID);
-    let real_key = STANDARD.encode(hasher.finalize());
+    let real_key = STANDARD.encode(hasher.digest().bytes());
 
     let agent = request
         .headers()
