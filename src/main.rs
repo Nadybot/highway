@@ -944,22 +944,24 @@ async fn main() -> Result<(), IoError> {
         let global_state = global_state.clone();
         let metrics_handle = metrics_handle.clone();
 
-        if let Err(e) = http1::Builder::new()
-            .serve_connection(
-                TokioIo::new(stream),
-                service_fn(move |req: Request<Incoming>| {
-                    http_handler(
-                        remote_addr,
-                        req,
-                        global_state.clone(),
-                        metrics_handle.clone(),
-                    )
-                }),
-            )
-            .with_upgrades()
-            .await
-        {
-            error!("Failed to serve connection: {e}");
-        };
+        tokio::spawn(async move {
+            if let Err(e) = http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |req: Request<Incoming>| {
+                        http_handler(
+                            remote_addr,
+                            req,
+                            global_state.clone(),
+                            metrics_handle.clone(),
+                        )
+                    }),
+                )
+                .with_upgrades()
+                .await
+            {
+                error!("Failed to serve connection: {e}");
+            };
+        });
     }
 }
