@@ -808,25 +808,26 @@ async fn http_handler(
     let mut resp = match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => websocket_endpoint_handler(addr, req, global_state).await,
         (&Method::GET, "/metrics") => {
-            if let Some(auth_required) = &global_state.config.metrics_token {
-                if let Some(auth) = req.headers().get(AUTHORIZATION) {
-                    if auth != auth_required {
-                        return Ok(Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(Full::default())
-                            .unwrap());
-                    }
-                } else {
-                    return Ok(Response::builder()
-                        .status(StatusCode::FORBIDDEN)
-                        .body(Full::default())
-                        .unwrap());
-                }
-            }
+            let authorized =
+                global_state
+                    .config
+                    .metrics_token
+                    .as_ref()
+                    .map_or(true, |expected_token| {
+                        req.headers().get(AUTHORIZATION).map(|v| v.as_bytes())
+                            == Some(expected_token.as_bytes())
+                    });
 
-            Ok(Response::builder()
-                .body(Full::from(metrics_handle.render()))
-                .unwrap())
+            if authorized {
+                Ok(Response::builder()
+                    .body(Full::from(metrics_handle.render()))
+                    .unwrap())
+            } else {
+                Ok(Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Full::default())
+                    .unwrap())
+            }
         }
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
