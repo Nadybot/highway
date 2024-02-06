@@ -104,11 +104,11 @@ impl GlobalState {
             );
         };
 
-        metrics::increment_counter!("highway_total_connections", "ip" => ip.to_string());
-        metrics::increment_gauge!("highway_current_connections", 1.0, "ip" => ip.to_string());
+        metrics::counter!("highway_total_connections", "ip" => ip.to_string()).increment(1);
+        metrics::gauge!("highway_current_connections", "ip" => ip.to_string()).increment(1.0);
 
         if let Some(agent) = agent {
-            metrics::increment_gauge!("highway_user_agents", 1.0, "agent" => agent);
+            metrics::gauge!("highway_user_agents", "agent" => agent).increment(1.0);
         }
 
         true
@@ -122,10 +122,10 @@ impl GlobalState {
             .expect("Must have been connected previously");
         entry.connection_count -= 1;
 
-        metrics::decrement_gauge!("highway_current_connections", 1.0, "ip" => ip.to_string());
+        metrics::gauge!("highway_current_connections", "ip" => ip.to_string()).decrement(1.0);
 
         if let Some(agent) = agent {
-            metrics::decrement_gauge!("highway_user_agents", 1.0, "agent" => agent);
+            metrics::gauge!("highway_user_agents", "agent" => agent).decrement(1.0);
         }
 
         if entry.connection_count == 0 {
@@ -587,8 +587,8 @@ impl Room {
     /// sent this message.
     fn broadcast(&self, msg: &Message, sender: Option<&str>) {
         if sender.is_some() {
-            metrics::increment_counter!("highway_messages_received");
-            metrics::counter!("highway_messages_sent", (self.senders.len() - 1) as u64);
+            metrics::counter!("highway_messages_received").increment(1);
+            metrics::counter!("highway_messages_sent").increment((self.senders.len() - 1) as u64);
         }
 
         for send_handle in self.senders.iter() {
@@ -603,7 +603,7 @@ impl Room {
         self.senders.iter().map(|e| e.key().to_string()).collect()
     }
 
-    /// Subscribe a peer to this room.
+    /// Subscribe a peer to this room.self.senders.len() as f64,
     fn subscribe(&self, peer: &Peer) {
         self.announce_join(&peer.id);
 
@@ -611,7 +611,8 @@ impl Room {
 
         self.senders.insert(peer.id.clone(), peer.sender.clone());
 
-        metrics::gauge!("highway_room_connections", self.senders.len() as f64, "room" => self.name.clone());
+        metrics::gauge!("highway_room_connections", "room" => self.name.clone())
+            .set(self.senders.len() as f64);
     }
 
     /// Unsubscribe a peer from this room.
@@ -625,7 +626,8 @@ impl Room {
             peer.global_state.rooms.remove(self.inner.name.as_str());
         }
 
-        metrics::gauge!("highway_room_connections", self.senders.len() as f64, "room" => self.name.clone());
+        metrics::gauge!("highway_room_connections", "room" => self.name.clone())
+            .set(self.senders.len() as f64);
     }
 
     /// Send a new room-info to everyone.
@@ -801,7 +803,7 @@ async fn http_handler(
     addr: SocketAddr,
     req: Request<Incoming>,
     global_state: GlobalStateRef,
-    metrics_handle: Arc<PrometheusHandle>,
+    metrics_handle: PrometheusHandle,
 ) -> Result<Response<Full<Bytes>>, HyperError> {
     debug!("{} request to {}", req.method(), req.uri().path());
 
@@ -868,8 +870,8 @@ async fn main() -> Result<(), IoError> {
 
     // Set up metrics collection
     let recorder = PrometheusBuilder::new().build_recorder();
-    let metrics_handle = Arc::new(recorder.handle());
-    metrics::set_boxed_recorder(Box::new(recorder)).unwrap();
+    let metrics_handle = recorder.handle();
+    metrics::set_global_recorder(recorder).unwrap();
 
     let mut config = match config::try_load() {
         Ok(cfg) => cfg,
